@@ -1,0 +1,16 @@
+{
+  "lastChangelogVersion": "0.75.3",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "kimi-k2.6",
+  "defaultThinkingLevel": "low",
+  "hideThinkingBlock": false,
+  "theme": "trans-pride",
+  "steeringMode": "one-at-a-time",
+  "followUpMode": "one-at-a-time",
+  "transport": "auto",
+  "enableSkillCommands": false,
+  "skills": [
+    "!C:/Users/Parth Thakre/.agents/skills/**"
+  ],
+  "quietStartup": true
+}

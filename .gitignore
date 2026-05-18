@@ -1,0 +1,16 @@
+# Sensitive files
+auth.json
+azure-foundry.json
+
+# Dependencies
+node_modules/
+
+# Binaries
+bin/
+*.exe
+
+# Session data
+sessions/
+
+# Backups
+*.bak.*

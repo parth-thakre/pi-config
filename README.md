@@ -1,32 +1,15 @@
-# pi Configuration
+# Pi config
 
-Personal configuration for [pi](https://github.com/earendil-works/pi-coding-agent) — the AI coding agent harness.
+Personal, portable configuration for [Pi](https://github.com/badlogic/pi-mono), including extensions, skills, themes, model definitions, settings, and keybindings.
 
-## What's Included
+## Restore
 
-- **Settings** — `settings.json` (default model, theme, steering mode, etc.)
-- **Models** — `models.json` (provider/model configuration)
-- **Extensions** — Custom pi extensions (`extensions/`)
-  - `azure-foundry/` — Azure AI Foundry provider
-  - `exa.ts` — Exa web search integration
-  - `firecrawl.ts` — Firecrawl scraping integration
-  - `flow-title.ts` — Dynamic flow title generation
-  - `llamacpp.ts` — llama.cpp provider
-  - `searxng.ts` — SearXNG search integration
-  - `gen-pi-logo.mjs` — Logo generation script
-- **Disabled Extensions** — `extensions.disabled/`
-- **Skills** — Custom agent skills (`skills/`)
-  - `web-research/` — Web research skill
-- **Themes** — Custom TUI themes (`themes/` & `themes.disabled/`)
-  - `trans-pride.json`
-  - `catppuccin-mocha.json`
+Clone the repository, review the files, then copy `agent/` into `~/.pi/agent/`.
 
-## Installation
+Credentials and machine-local data are intentionally excluded. Configure provider authentication separately after restoring.
 
-Copy the contents of `agent/` into your pi agent directory (usually `~/.pi/agent/`):
+## Never committed
 
-```bash
-cp -r agent/* ~/.pi/agent/
-```
-
-> ⚠️ **Note:** This repo excludes sensitive files like `auth.json` and `azure-foundry.json`. You will need to re-enter API keys and credentials after installing.
+- `.env`, `auth.json`, provider credentials, and trust decisions
+- sessions and workflow run artifacts
+- dependencies, binaries, caches, and backups

@@ -1,16 +1,30 @@
-# Sensitive files
+# Credentials and machine-local secrets
+.env
+.env.*
 auth.json
 azure-foundry.json
+trust.json
+*credentials*
+*secret*
 
-# Dependencies
+# Session and runtime data
+sessions/
+workflows/
+pi-acp/
+
+# Dependencies and generated caches
 node_modules/
+*.tsbuildinfo
+__pycache__/
 
-# Binaries
+# Binaries and backups
 bin/
 *.exe
-
-# Session data
-sessions/
-
-# Backups
+*.bak
 *.bak.*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

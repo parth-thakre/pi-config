@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "ES2022",
+    "types": ["node"],
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "extensions/computer-use/**/*.ts",
+    "extensions/shared/**/*.ts",
+    "extensions/subagents/**/*.ts",
+    "extensions/workflows/**/*.ts"
+  ]
+}

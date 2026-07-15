@@ -1,3 +1,6 @@
+import { existsSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { extname, join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
@@ -77,12 +80,41 @@ function providerName(ctx: ExtensionContext) {
 	return m?.provider ?? "";
 }
 
-const EXTENSIONS = ["azure-foundry", "exa", "firecrawl", "flow-title", "searxng"];
-const THEMES     = ["trans-pride"];
-const SKILLS     = ["web-research"];
+const AGENT_DIR = join(homedir(), ".pi", "agent");
+
+function listDirNames(path: string, include: (entry: string, fullPath: string) => boolean) {
+	try {
+		return readdirSync(path, { withFileTypes: true })
+			.map((entry) => {
+				const fullPath = join(path, entry.name);
+				return include(entry.name, fullPath) ? entry.name : undefined;
+			})
+			.filter((name): name is string => Boolean(name))
+			.map((name) => name.replace(/\.(ts|js|mjs|json)$/i, ""))
+			.sort((a, b) => a.localeCompare(b));
+	} catch {
+		return [];
+	}
+}
+
+function dynamicExtensions() {
+	return listDirNames(join(AGENT_DIR, "extensions"), (name, fullPath) => {
+		const ext = extname(name).toLowerCase();
+		return [".ts", ".js"].includes(ext) || existsSync(join(fullPath, "index.ts")) || existsSync(join(fullPath, "index.js"));
+	}).filter((name) => name !== "flow-title");
+}
+
+function dynamicThemes() {
+	return listDirNames(join(AGENT_DIR, "themes"), (name) => extname(name).toLowerCase() === ".json");
+}
+
+function dynamicSkills() {
+	return listDirNames(join(AGENT_DIR, "skills"), (_name, fullPath) => existsSync(join(fullPath, "SKILL.md")));
+}
 
 function pill(label: string, color: RGB, items: string[]): string {
-	return fg(color, label) + " " + items.map((i) => fg(MUTED, i)).join(fg(MUTED, "  "));
+	const shown = items.length ? items : ["none"];
+	return fg(color, label) + " " + shown.map((i) => fg(MUTED, i)).join(fg(MUTED, "  "));
 }
 
 function renderHeader(width: number, ctx: ExtensionContext): string[] {
@@ -94,9 +126,9 @@ function renderHeader(width: number, ctx: ExtensionContext): string[] {
 		center(fg(PINK, modelName(ctx)), width),
 		provider ? center(fg(MUTED, provider.toLowerCase()), width) : "",
 		"",
-		center(pill("extensions", BLUE,  EXTENSIONS), width),
-		center(pill("theme",      PINK,  THEMES),     width),
-		center(pill("skills",     WHITE, SKILLS),     width),
+		center(pill("extensions", BLUE,  dynamicExtensions()), width),
+		center(pill("theme",      PINK,  dynamicThemes()),     width),
+		center(pill("skills",     WHITE, dynamicSkills()),     width),
 		"",
 	];
 }

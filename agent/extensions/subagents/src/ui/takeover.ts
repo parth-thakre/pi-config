@@ -13,10 +13,17 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Input, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sanitizeTerminalText } from "../../../shared/terminal-text.ts";
 import { formatElapsed, type SubagentSnapshot } from "../domain.ts";
 import { formatContextUtilization } from "../format.ts";
 import type { SubagentReadModel } from "../manager.ts";
 import { buildTranscriptLines } from "./transcript.ts";
+
+function displayLine(value: unknown) {
+  return sanitizeTerminalText(
+    typeof value === "string" ? value : String(value ?? ""),
+  ).replaceAll("\n", " ");
+}
 
 function configuredKeys(
   keybindings: KeybindingsManager,
@@ -276,17 +283,19 @@ class SubagentDashboard implements Component {
 
       // Left: marker, status square, title, dim id
       const marker = isSelected ? theme.fg("accent", "❯") : " ";
+      const displayTitle = displayLine(snap.title);
+      const displayId = displayLine(snap.id);
       const title = isSelected
-        ? theme.fg("accent", snap.title)
-        : theme.fg("text", snap.title);
-      const left = ` ${marker} ${statusGlyph(snap, theme)} ${title} ${theme.fg("dim", snap.id)}`;
+        ? theme.fg("accent", displayTitle)
+        : theme.fg("text", displayTitle);
+      const left = ` ${marker} ${statusGlyph(snap, theme)} ${title} ${theme.fg("dim", displayId)}`;
 
       // Right: backend · model · context utilization · elapsed · status
       const utilization = formatContextUtilization(snap.usage);
       const dot = theme.fg("dim", " · ");
       const rightParts = [
-        theme.fg("muted", snap.backend),
-        theme.fg("muted", snap.meta.modelLabel ?? "?"),
+        theme.fg("muted", displayLine(snap.backend)),
+        theme.fg("muted", displayLine(snap.meta.modelLabel ?? "?")),
         ...(utilization ? [theme.fg("muted", utilization)] : []),
         theme.fg("muted", formatElapsed(snap)),
         statusWord(snap, theme),
@@ -462,9 +471,15 @@ class TakeoverView implements Component, Focusable {
     const utilization = formatContextUtilization(snap.usage);
     const header =
       `${statusGlyph(snap, theme)} ` +
-      theme.fg("accent", theme.bold(`${snap.id} · ${snap.title}`)) +
+      theme.fg(
+        "accent",
+        theme.bold(`${displayLine(snap.id)} · ${displayLine(snap.title)}`),
+      ) +
       theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
-      theme.fg("dim", ` · ${snap.backend}: ${snap.meta.modelLabel ?? "?"}`) +
+      theme.fg(
+        "dim",
+        ` · ${displayLine(snap.backend)}: ${displayLine(snap.meta.modelLabel ?? "?")}`,
+      ) +
       (utilization ? theme.fg("dim", ` · ${utilization}`) : "");
     lines.push(truncateToWidth(header, width));
     lines.push(border);
@@ -482,7 +497,10 @@ class TakeoverView implements Component, Focusable {
     const body: string[] = [];
     if (snap.errorText) {
       body.push(
-        truncateToWidth(theme.fg("error", `error: ${snap.errorText}`), width),
+        truncateToWidth(
+          theme.fg("error", `error: ${displayLine(snap.errorText)}`),
+          width,
+        ),
       );
     }
 

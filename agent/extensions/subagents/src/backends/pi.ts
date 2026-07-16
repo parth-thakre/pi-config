@@ -35,9 +35,12 @@ import type {
   TranscriptPart,
 } from "../domain.ts";
 import { SendError, SpawnError } from "../domain.ts";
+import { boundInitialTail } from "../bounds.ts";
 
 const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 const CHILD_TOOL_CALL_TIMEOUT_MS = 3 * 60 * 1_000;
+const TOOL_PREVIEW_MAX_BYTES = 4 * 1024;
+const TRANSCRIPT_PART_MAX_BYTES = 8 * 1024;
 
 /** Tools that headless children must not receive. Everything else stays enabled. */
 const CHILD_EXCLUDED_TOOL_NAMES = [
@@ -241,9 +244,66 @@ function finalOutput(session: AgentSession): string {
 }
 
 function safeJson(value: unknown): string | undefined {
+  let output = "";
+  const seen = new WeakSet<object>();
+  const append = (text: string) => {
+    const remaining = TOOL_PREVIEW_MAX_BYTES - Buffer.byteLength(output, "utf8");
+    if (remaining > 0) output += boundInitialTail(text, remaining);
+  };
+  const visit = (item: unknown, depth: number): void => {
+    if (Buffer.byteLength(output, "utf8") >= TOOL_PREVIEW_MAX_BYTES) return;
+    if (item === null || typeof item === "number" || typeof item === "boolean") {
+      append(String(item));
+      return;
+    }
+    if (typeof item === "string") {
+      append(JSON.stringify(boundInitialTail(item, 1_024)));
+      return;
+    }
+    if (typeof item !== "object") {
+      append(JSON.stringify(String(item)));
+      return;
+    }
+    if (seen.has(item)) {
+      append('"[circular]"');
+      return;
+    }
+    if (depth >= 3) {
+      append('"[nested]"');
+      return;
+    }
+    seen.add(item);
+    if (Array.isArray(item)) {
+      append("[");
+      for (let index = 0; index < item.length && index < 32; index++) {
+        if (index > 0) append(",");
+        visit(item[index], depth + 1);
+      }
+      if (item.length > 32) append(',"[more]"');
+      append("]");
+      return;
+    }
+    append("{");
+    let count = 0;
+    for (const key in item as Record<string, unknown>) {
+      if (!Object.prototype.hasOwnProperty.call(item, key)) continue;
+      if (count > 0) append(",");
+      if (count++ >= 32) {
+        append('"[more]":"omitted"');
+        break;
+      }
+      append(`${JSON.stringify(boundInitialTail(key, 256))}:`);
+      try {
+        visit((item as Record<string, unknown>)[key], depth + 1);
+      } catch {
+        append('"[unreadable]"');
+      }
+    }
+    append("}");
+  };
   try {
-    const text = JSON.stringify(value);
-    return text === "{}" ? undefined : text;
+    visit(value, 0);
+    return output === "{}" ? undefined : output;
   } catch {
     return undefined;
   }
@@ -252,10 +312,11 @@ function safeJson(value: unknown): string | undefined {
 /** First non-empty line of a tool result-ish value (v1 liveToolPreview). */
 function toolPreview(value: unknown): string | undefined {
   if (typeof value === "string") {
-    return value
+    const line = value
       .split("\n")
-      .find((line) => line.trim())
+      .find((candidate) => candidate.trim())
       ?.trim();
+    return line ? boundInitialTail(line, TOOL_PREVIEW_MAX_BYTES) : undefined;
   }
   if (!value || typeof value !== "object") return undefined;
   const content = (value as { content?: unknown }).content;
@@ -265,7 +326,8 @@ function toolPreview(value: unknown): string | undefined {
     const record = part as { type?: unknown; text?: unknown };
     if (record.type !== "text" || typeof record.text !== "string") continue;
     const firstLine = record.text.split("\n").find((line) => line.trim());
-    if (firstLine) return firstLine.trim();
+    if (firstLine)
+      return boundInitialTail(firstLine.trim(), TOOL_PREVIEW_MAX_BYTES);
   }
   return undefined;
 }
@@ -274,11 +336,16 @@ function assistantParts(msg: AssistantMessage): TranscriptPart[] {
   const parts: TranscriptPart[] = [];
   for (const part of msg.content) {
     if (part.type === "text") {
-      parts.push({ type: "text", text: part.text });
+      parts.push({
+        type: "text",
+        text: boundInitialTail(part.text, TRANSCRIPT_PART_MAX_BYTES),
+      });
     } else if (part.type === "thinking") {
       parts.push({
         type: "thinking",
-        text: part.redacted ? "" : part.thinking,
+        text: part.redacted
+          ? ""
+          : boundInitialTail(part.thinking, TRANSCRIPT_PART_MAX_BYTES),
         redacted: part.redacted,
       });
     } else if (part.type === "toolCall") {
@@ -492,7 +559,12 @@ const makePiSession = (
           const role = messageRole(event.message);
           if (role === "user") {
             const text = userText(event.message as Message);
-            if (text.trim()) emit({ _tag: "UserMessage", text });
+            if (text.trim()) {
+              emit({
+                _tag: "UserMessage",
+                text: boundInitialTail(text, 16 * 1024),
+              });
+            }
           } else if (role === "assistant") {
             emit({
               _tag: "AssistantMessage",

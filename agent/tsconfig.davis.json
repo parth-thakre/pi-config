@@ -11,7 +11,11 @@
     "verbatimModuleSyntax": true
   },
   "include": [
+    "extensions/*.ts",
+    "extensions/background-terminals/**/*.ts",
     "extensions/computer-use/**/*.ts",
+    "extensions/file-search/**/*.ts",
+    "extensions/firecrawl-search/**/*.ts",
     "extensions/shared/**/*.ts",
     "extensions/subagents/**/*.ts",
     "extensions/workflows/**/*.ts"

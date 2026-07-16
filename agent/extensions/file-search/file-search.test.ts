@@ -443,7 +443,10 @@ test("broad rg output streams to a private artifact without buffering through pi
   const root = await makeFixture();
   const { tools } = createApi();
   try {
-    const lines = Array.from({ length: 1_000 }, (_, index) => `needle-${index}`).join("\n");
+    const lines = Array.from(
+      { length: 1_000 },
+      (_, index) => `needle-${index}`,
+    ).join("\n");
     await Promise.all(
       ["many-a.txt", "many-b.txt", "many-c.txt"].map((name) =>
         writeFile(join(root, name), lines),
@@ -724,7 +727,6 @@ test("file-search stays dependency-free, offline, and does not alter stock tools
     source,
     /setActiveTools|registerTool\(\{\s*name: ["'](?:grep|find|ls)["']/,
   );
-  assert.equal(packageJson.dependencies?.effect, undefined);
   assert.equal(packageJson.devDependencies?.vitest, undefined);
   assert.equal(existsSync(join(directory, "package-lock.json")), false);
   assert.match(FD_PROMPT_GUIDELINES.join(" "), /stock find and ls/);

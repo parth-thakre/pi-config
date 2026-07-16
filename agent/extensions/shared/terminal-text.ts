@@ -5,15 +5,27 @@
  * before applying theme styles or measuring, wrapping, and truncating text.
  */
 
-const ESC = "\u001b";
-const BEL = "\u0007";
-const C1_DCS = "\u0090";
-const C1_CSI = "\u009b";
-const C1_ST = "\u009c";
-const C1_OSC = "\u009d";
-const C1_SOS = "\u0098";
-const C1_PM = "\u009e";
-const C1_APC = "\u009f";
+const ESC = String.fromCharCode(0x1b);
+const BEL = String.fromCharCode(0x07);
+const C1_DCS = String.fromCharCode(0x90);
+const C1_CSI = String.fromCharCode(0x9b);
+const C1_ST = String.fromCharCode(0x9c);
+const C1_OSC = String.fromCharCode(0x9d);
+const C1_SOS = String.fromCharCode(0x98);
+const C1_PM = String.fromCharCode(0x9e);
+const C1_APC = String.fromCharCode(0x9f);
+
+/** ESC or any C1 introducer that can start a multi-character sequence. */
+const SEQUENCE_INTRODUCER = new RegExp(
+  "[\\u001b\\u0090\\u0098\\u009b\\u009d-\\u009f]",
+);
+/** Anything sanitizeTerminalText would remove or rewrite. */
+const NEEDS_SANITIZING = new RegExp("[\\u0000-\\u001f\\u007f-\\u009f]");
+/** Loose control characters removed after sequence stripping. */
+const CONTROL_CHARACTERS = new RegExp(
+  "[\\u0000-\\u0009\\u000b-\\u001f\\u007f-\\u009f]",
+  "g",
+);
 
 function isCodeInRange(char: string | undefined, start: number, end: number) {
   if (!char) return false;
@@ -50,8 +62,16 @@ function consumeEscape(text: string, start: number) {
 }
 
 function stripTerminalSequences(text: string) {
-  let output = "";
+  if (!SEQUENCE_INTRODUCER.test(text)) return text;
+
+  const parts: string[] = [];
   let index = 0;
+  let plainStart = 0;
+  const skipSequence = (start: number, end: number) => {
+    if (start > plainStart) parts.push(text.slice(plainStart, start));
+    plainStart = end;
+    return end;
+  };
 
   while (index < text.length) {
     const char = text[index];
@@ -59,24 +79,33 @@ function stripTerminalSequences(text: string) {
     if (char === ESC) {
       const next = text[index + 1];
       if (next === "]") {
-        index = consumeControlString(text, index + 2, true);
+        index = skipSequence(
+          index,
+          consumeControlString(text, index + 2, true),
+        );
       } else if (next === "[") {
-        index = consumeCsi(text, index + 2);
+        index = skipSequence(index, consumeCsi(text, index + 2));
       } else if (next === "P" || next === "X" || next === "^" || next === "_") {
-        index = consumeControlString(text, index + 2, false);
+        index = skipSequence(
+          index,
+          consumeControlString(text, index + 2, false),
+        );
       } else {
         const consumed = consumeEscape(text, index + 1);
-        index = consumed > index + 1 ? consumed : index + 1;
+        index = skipSequence(
+          index,
+          consumed > index + 1 ? consumed : index + 1,
+        );
       }
       continue;
     }
 
     if (char === C1_OSC) {
-      index = consumeControlString(text, index + 1, true);
+      index = skipSequence(index, consumeControlString(text, index + 1, true));
       continue;
     }
     if (char === C1_CSI) {
-      index = consumeCsi(text, index + 1);
+      index = skipSequence(index, consumeCsi(text, index + 1));
       continue;
     }
     if (
@@ -85,18 +114,20 @@ function stripTerminalSequences(text: string) {
       char === C1_PM ||
       char === C1_APC
     ) {
-      index = consumeControlString(text, index + 1, false);
+      index = skipSequence(index, consumeControlString(text, index + 1, false));
       continue;
     }
 
-    output += char;
     index++;
   }
 
-  return output;
+  if (plainStart === 0) return text;
+  if (plainStart < text.length) parts.push(text.slice(plainStart));
+  return parts.join("");
 }
 
 function collapseProgressRewrites(text: string) {
+  if (!text.includes("\r")) return text;
   return text
     .split("\n")
     .map((line) => {
@@ -121,6 +152,9 @@ function collapseProgressRewrites(text: string) {
  * non-empty segment.
  */
 export function sanitizeTerminalText(text: string): string {
+  // Fast path: most rendered lines contain no control characters at all.
+  if (!NEEDS_SANITIZING.test(text)) return text;
+
   const normalizedNewlines = text.replaceAll("\r\n", "\n");
   const withoutTerminalSequences = stripTerminalSequences(normalizedNewlines);
   const withoutProgressHistory = collapseProgressRewrites(
@@ -129,5 +163,5 @@ export function sanitizeTerminalText(text: string): string {
 
   return withoutProgressHistory
     .replaceAll("\t", "  ")
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, "");
+    .replace(CONTROL_CHARACTERS, "");
 }

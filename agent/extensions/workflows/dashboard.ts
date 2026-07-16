@@ -493,6 +493,82 @@ export function sessionWorkflowRunIds(ctx: ExtensionContext): Set<string> {
   return runIds;
 }
 
+/**
+ * Parsed persisted runs keyed by run id, invalidated by workflow.json
+ * mtime/size. persistWorkflowJson writes workflow.json after its artifacts, so
+ * its stat also covers result.json and transcripts.json. This keeps the 500ms
+ * live-refresh tick from re-reading and re-parsing every settled run.
+ */
+const persistedRunCache = new Map<
+  string,
+  { mtimeMs: number; size: number; details: WorkflowDetails }
+>();
+
+function loadPersistedRun(runId: string): WorkflowDetails | undefined {
+  const runDir = path.join(runsDir(), runId);
+  const workflowFile = path.join(runDir, "workflow.json");
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(workflowFile);
+  } catch {
+    return undefined;
+  }
+  const cached = persistedRunCache.get(runId);
+  if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.details;
+  }
+
+  const raw = JSON.parse(fs.readFileSync(workflowFile, "utf8"));
+  const details = normalizeDetails(runId, raw);
+  if (!details) return undefined;
+  if (details.resultArtifact) {
+    try {
+      details.result = JSON.parse(
+        fs.readFileSync(
+          path.join(runDir, path.basename(details.resultArtifact)),
+          "utf8",
+        ),
+      );
+    } catch {
+      // Keep the compact compatibility marker from workflow.json.
+    }
+  }
+  if (details.transcriptArtifact) {
+    try {
+      const transcripts = JSON.parse(
+        fs.readFileSync(
+          path.join(runDir, path.basename(details.transcriptArtifact)),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      for (const agent of details.agents) {
+        agent.transcript = normalizeTranscript(
+          transcripts[String(agent.index)],
+        );
+      }
+    } catch {
+      // Older or partially written artifacts simply lack transcripts.
+    }
+  }
+  if (details.status === "running") {
+    details.status = "aborted";
+    details.finishedAt = details.finishedAt ?? Date.now();
+    details.error = details.error ?? "Recovered stale run that was not active";
+    for (const agent of details.agents) {
+      if (agent.state !== "running") continue;
+      agent.state = "error";
+      agent.error = agent.error ?? "Run ended before this agent settled";
+      agent.finishedAt = details.finishedAt;
+    }
+  }
+  persistedRunCache.set(runId, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    details,
+  });
+  return details;
+}
+
 export function loadRunEntries(
   active: Map<string, WorkflowDetails>,
   sessionId: string,
@@ -504,6 +580,12 @@ export function loadRunEntries(
   } catch {
     // No runs yet.
   }
+  if (persistedRunCache.size > names.length) {
+    const present = new Set(names);
+    for (const runId of persistedRunCache.keys()) {
+      if (!present.has(runId)) persistedRunCache.delete(runId);
+    }
+  }
   const entries: RunEntry[] = [];
   for (const runId of names) {
     const live = active.get(runId);
@@ -512,56 +594,11 @@ export function loadRunEntries(
       continue;
     }
     try {
-      const raw = JSON.parse(
-        fs.readFileSync(path.join(runsDir(), runId, "workflow.json"), "utf8"),
-      );
-      const details = normalizeDetails(runId, raw);
+      const details = loadPersistedRun(runId);
       if (
         details &&
         (details.sessionId === sessionId || referencedRunIds.has(runId))
       ) {
-        const runDir = path.join(runsDir(), runId);
-        if (details.resultArtifact) {
-          try {
-            details.result = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.resultArtifact)),
-                "utf8",
-              ),
-            );
-          } catch {
-            // Keep the compact compatibility marker from workflow.json.
-          }
-        }
-        if (details.transcriptArtifact) {
-          try {
-            const transcripts = JSON.parse(
-              fs.readFileSync(
-                path.join(runDir, path.basename(details.transcriptArtifact)),
-                "utf8",
-              ),
-            ) as Record<string, unknown>;
-            for (const agent of details.agents) {
-              agent.transcript = normalizeTranscript(
-                transcripts[String(agent.index)],
-              );
-            }
-          } catch {
-            // Older or partially written artifacts simply lack transcripts.
-          }
-        }
-        if (details.status === "running") {
-          details.status = "aborted";
-          details.finishedAt = details.finishedAt ?? Date.now();
-          details.error =
-            details.error ?? "Recovered stale run that was not active";
-          for (const agent of details.agents) {
-            if (agent.state !== "running") continue;
-            agent.state = "error";
-            agent.error = agent.error ?? "Run ended before this agent settled";
-            agent.finishedAt = details.finishedAt;
-          }
-        }
         entries.push({ runId, details, live: false });
       }
     } catch {
@@ -804,32 +841,25 @@ export class WorkflowDashboard {
         return;
       }
     } else if (this.view === "detail") {
+      const groups = this.groups();
       if (this.detailFocus === "phases") {
         if (up) {
-          this.phaseIndex = wrapSelection(
-            this.phaseIndex,
-            -1,
-            this.groups().length,
-          );
+          this.phaseIndex = wrapSelection(this.phaseIndex, -1, groups.length);
           this.agentIndex = 0;
         } else if (down) {
-          this.phaseIndex = wrapSelection(
-            this.phaseIndex,
-            1,
-            this.groups().length,
-          );
+          this.phaseIndex = wrapSelection(this.phaseIndex, 1, groups.length);
           this.agentIndex = 0;
         } else if (data === "g") {
           this.phaseIndex = 0;
           this.agentIndex = 0;
         } else if (data === "G") {
-          this.phaseIndex = Math.max(0, this.groups().length - 1);
+          this.phaseIndex = Math.max(0, groups.length - 1);
           this.agentIndex = 0;
         } else if (
           right ||
-          (confirm && (this.selectedGroup()?.agents.length ?? 0) > 0)
+          (confirm && (groups[this.phaseIndex]?.agents.length ?? 0) > 0)
         ) {
-          if ((this.selectedGroup()?.agents.length ?? 0) > 0) {
+          if ((groups[this.phaseIndex]?.agents.length ?? 0) > 0) {
             this.detailFocus = "agents";
             this.clampAgentIndex();
           }
@@ -838,7 +868,7 @@ export class WorkflowDashboard {
           this.refresh();
         }
       } else {
-        const agents = this.selectedGroup()?.agents ?? [];
+        const agents = groups[this.phaseIndex]?.agents ?? [];
         if (up) {
           this.agentIndex = wrapSelection(this.agentIndex, -1, agents.length);
         } else if (down) {
@@ -849,7 +879,7 @@ export class WorkflowDashboard {
           this.agentIndex = Math.max(0, agents.length - 1);
         } else if (left || cancel) {
           this.detailFocus = "phases";
-        } else if (confirm && this.selectedAgent()) {
+        } else if (confirm && agents[this.agentIndex]) {
           this.transcriptScrollOffset = 0;
           this.transcriptRowCount = 0;
           this.transcriptReference = undefined;
@@ -1093,7 +1123,10 @@ export class WorkflowDashboard {
     const groups = this.groups();
     this.phaseIndex = Math.min(this.phaseIndex, Math.max(0, groups.length - 1));
     const selectedGroup = groups[this.phaseIndex];
-    this.clampAgentIndex();
+    this.agentIndex = Math.min(
+      this.agentIndex,
+      Math.max(0, (selectedGroup?.agents.length ?? 0) - 1),
+    );
 
     const panelHeight = height - 3;
     const bodyHeight = Math.max(0, panelHeight - 2);

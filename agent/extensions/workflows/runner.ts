@@ -44,6 +44,8 @@ const TRANSCRIPT_ENTRY_MAX_BYTES = 16 * 1024;
 const TRANSCRIPT_TOTAL_MAX_BYTES = 256 * 1024;
 const TRANSCRIPT_MAX_ENTRIES = 200;
 export const FIRST_RESPONSE_TIMEOUT_MS = 45_000;
+/** Progress transcripts are rebuilt at most this often; the terminal snapshot is always exact. */
+const PROGRESS_TRANSCRIPT_INTERVAL_MS = 250;
 export const AGENT_ABORT_TIMEOUT_MS = 5_000;
 export const READ_ONLY_WORKFLOW_TOOLS = ["read", "grep", "find", "ls"] as const;
 
@@ -569,6 +571,10 @@ export async function runAgent(
     }
   };
 
+  // Rebuilding the transcript is O(messages); doing it on every event makes a
+  // long run quadratic. Progress reuses a recent build; outcomes stay exact.
+  let progressTranscript: TranscriptEntry[] = [];
+  let progressTranscriptBuiltAt = 0;
   const unsubscribe = childSession.subscribe((event) => {
     if (!acceptingEvents) return;
     if (
@@ -591,12 +597,20 @@ export async function runAgent(
       return;
     }
     sync();
+    const now = Date.now();
+    if (now - progressTranscriptBuiltAt >= PROGRESS_TRANSCRIPT_INTERVAL_MS) {
+      progressTranscriptBuiltAt = now;
+      progressTranscript = transcriptFromMessages(
+        childSession.messages,
+        toolTimings,
+      );
+    }
     options.onProgress?.({
       preview: finalOutput(childSession.messages),
       usage,
       model: modelId,
       contextWindow,
-      transcript: transcriptFromMessages(childSession.messages, toolTimings),
+      transcript: progressTranscript,
     });
   });
 
@@ -622,7 +636,9 @@ export async function runAgent(
   let transcript: TranscriptEntry[] = [];
   try {
     if (!aborted) {
-      const prompt = childSession.prompt(buildWorkflowAgentPrompt(options.prompt));
+      const prompt = childSession.prompt(
+        buildWorkflowAgentPrompt(options.prompt),
+      );
       void prompt.catch(() => {});
       await Promise.race([prompt, watchdog.promise, abortGate]);
     }

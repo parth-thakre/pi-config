@@ -126,7 +126,10 @@ export class RunController {
       this.parentSignal = parentSignal;
       this.parentAbort = () => this.abort("Parent operation was aborted");
       if (parentSignal.aborted) this.parentAbort();
-      else parentSignal.addEventListener("abort", this.parentAbort, { once: true });
+      else
+        parentSignal.addEventListener("abort", this.parentAbort, {
+          once: true,
+        });
     }
   }
 
@@ -147,7 +150,9 @@ export class RunController {
     if (this.signal.aborted) return Promise.reject(abortError(this.signal));
     if (this.callCount >= MAX_AGENT_CALLS) {
       return Promise.reject(
-        new Error(`Workflow exceeded the limit of ${MAX_AGENT_CALLS} agent calls`),
+        new Error(
+          `Workflow exceeded the limit of ${MAX_AGENT_CALLS} agent calls`,
+        ),
       );
     }
     this.callCount++;
@@ -157,7 +162,9 @@ export class RunController {
       const onRunAbort = () => taskAbort.abort(this.signal.reason);
       const onInvocationAbort = () => taskAbort.abort(invocationSignal?.reason);
       this.signal.addEventListener("abort", onRunAbort, { once: true });
-      invocationSignal?.addEventListener("abort", onInvocationAbort, { once: true });
+      invocationSignal?.addEventListener("abort", onInvocationAbort, {
+        once: true,
+      });
       if (this.signal.aborted) onRunAbort();
       else if (invocationSignal?.aborted) onInvocationAbort();
 

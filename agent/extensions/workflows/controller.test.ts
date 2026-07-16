@@ -10,13 +10,17 @@ test("RunController reserves calls synchronously and caps global fanout", async 
   let active = 0;
   let peak = 0;
   const tasks = Array.from({ length: 12 }, (_, index) =>
-    controller.schedule(async () => {
-      active++;
-      peak = Math.max(peak, active);
-      await delay(5);
-      active--;
-      return index;
-    }, undefined, "read"),
+    controller.schedule(
+      async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await delay(5);
+        active--;
+        return index;
+      },
+      undefined,
+      "read",
+    ),
   );
   assert.deepEqual(
     await Promise.all(tasks),
@@ -32,15 +36,25 @@ test("RunController makes writers exclusive while read-only agents fan out", asy
   let writers = 0;
   let overlap = false;
   const task = (kind: "read" | "write") =>
-    controller.schedule(async () => {
-      if (kind === "read") readers++;
-      else writers++;
-      if (writers > 1 || (writers > 0 && readers > 0)) overlap = true;
-      await delay(10);
-      if (kind === "read") readers--;
-      else writers--;
-    }, undefined, kind);
-  await Promise.all([task("read"), task("read"), task("write"), task("read"), task("write")]);
+    controller.schedule(
+      async () => {
+        if (kind === "read") readers++;
+        else writers++;
+        if (writers > 1 || (writers > 0 && readers > 0)) overlap = true;
+        await delay(10);
+        if (kind === "read") readers--;
+        else writers--;
+      },
+      undefined,
+      kind,
+    );
+  await Promise.all([
+    task("read"),
+    task("read"),
+    task("write"),
+    task("read"),
+    task("write"),
+  ]);
   assert.equal(overlap, false);
   assert.equal(await controller.settle(), true);
 });

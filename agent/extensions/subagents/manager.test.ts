@@ -105,10 +105,7 @@ test("stub subagent completes and delivers a final result", async () => {
 test("snapshot transcript fields retain a bounded initial-plus-tail view", async () => {
   await withManager(async (manager, runtime) => {
     const prompt = `initial-${"x".repeat(40_000)}-tail`;
-    const snap = await runTool(
-      runtime,
-      manager.spawn("claude", task(prompt)),
-    );
+    const snap = await runTool(runtime, manager.spawn("claude", task(prompt)));
     await runTool(runtime, manager.waitFor([snap.id]));
     const done = manager.view.get(snap.id)!;
     const user = done.transcript.find((item) => item.kind === "user");

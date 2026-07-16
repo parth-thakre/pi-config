@@ -112,7 +112,8 @@ export function recoverInterruptedWorkflowJobs(
     details.status = "aborted";
     details.lifecycle = "interrupted";
     details.finishedAt = options.now ?? Date.now();
-    details.error = details.error ?? "Workflow owner session ended before the job settled";
+    details.error =
+      details.error ?? "Workflow owner session ended before the job settled";
     for (const agent of details.agents) {
       if (agent.state !== "running") continue;
       agent.state = "error";

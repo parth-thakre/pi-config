@@ -330,7 +330,10 @@ test(
         const result = await settled(manager, snapshot.id);
         if (index === 0) {
           firstId = result.id;
-          firstFiles = [...result.stdout.spillFiles, ...result.stderr.spillFiles];
+          firstFiles = [
+            ...result.stdout.spillFiles,
+            ...result.stderr.spillFiles,
+          ];
           assert.ok(firstFiles.length > 0);
         }
       }

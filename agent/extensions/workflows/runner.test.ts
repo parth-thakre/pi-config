@@ -194,11 +194,17 @@ test("first-response watchdog reports provider/model and suppresses late timeout
   const disarmed = createFirstResponseWatchdog({ timeoutMs: 5 });
   disarmed.observe();
   const marker = await Promise.race([
-    disarmed.promise.then(() => "timeout", () => "timeout"),
+    disarmed.promise.then(
+      () => "timeout",
+      () => "timeout",
+    ),
     new Promise<string>((resolve) => setTimeout(() => resolve("disarmed"), 15)),
   ]);
   assert.equal(marker, "disarmed");
-  assert.deepEqual([...READ_ONLY_WORKFLOW_TOOLS], ["read", "grep", "find", "ls"]);
+  assert.deepEqual(
+    [...READ_ONLY_WORKFLOW_TOOLS],
+    ["read", "grep", "find", "ls"],
+  );
 });
 
 test("read-only policy repeatedly strips mutation and extension tools", () => {

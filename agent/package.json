@@ -12,6 +12,9 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "prettier": {
+    "endOfLine": "auto"
+  },
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.6",
     "@earendil-works/pi-coding-agent": "^0.80.6",

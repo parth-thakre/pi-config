@@ -315,7 +315,10 @@ const makeManager = Effect.gen(function* () {
       );
       const [removed] = entry.snapshot.transcript.splice(index, 1);
       if (!removed) break;
-      entry.transcriptBytes -= Buffer.byteLength(JSON.stringify(removed), "utf8");
+      entry.transcriptBytes -= Buffer.byteLength(
+        JSON.stringify(removed),
+        "utf8",
+      );
     }
   };
 

@@ -247,12 +247,17 @@ function safeJson(value: unknown): string | undefined {
   let output = "";
   const seen = new WeakSet<object>();
   const append = (text: string) => {
-    const remaining = TOOL_PREVIEW_MAX_BYTES - Buffer.byteLength(output, "utf8");
+    const remaining =
+      TOOL_PREVIEW_MAX_BYTES - Buffer.byteLength(output, "utf8");
     if (remaining > 0) output += boundInitialTail(text, remaining);
   };
   const visit = (item: unknown, depth: number): void => {
     if (Buffer.byteLength(output, "utf8") >= TOOL_PREVIEW_MAX_BYTES) return;
-    if (item === null || typeof item === "number" || typeof item === "boolean") {
+    if (
+      item === null ||
+      typeof item === "number" ||
+      typeof item === "boolean"
+    ) {
       append(String(item));
       return;
     }

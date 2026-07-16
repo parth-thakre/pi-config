@@ -37,7 +37,10 @@ test("TUI defaults background while headless execution is explicitly blocking", 
   assert.equal(resolveWorkflowBackgroundMode("tui", false), false);
   for (const mode of ["rpc", "json", "print"] as const) {
     assert.equal(resolveWorkflowBackgroundMode(mode), false);
-    assert.throws(() => resolveWorkflowBackgroundMode(mode, true), /unavailable outside the TUI/);
+    assert.throws(
+      () => resolveWorkflowBackgroundMode(mode, true),
+      /unavailable outside the TUI/,
+    );
   }
 });
 
@@ -69,7 +72,8 @@ test("recovery does not interrupt a record still owned by a live process", () =>
     const details = { ...record("wf_live"), ownerPid: 1234 };
     persistWorkflowJson(path.join(base, details.runId), details);
     assert.equal(
-      recoverInterruptedWorkflowJobs(base, { isProcessAlive: () => true }).length,
+      recoverInterruptedWorkflowJobs(base, { isProcessAlive: () => true })
+        .length,
       0,
     );
     const stored = JSON.parse(
@@ -89,11 +93,19 @@ test("same-process recovery distinguishes registered jobs from orphan records", 
     persistWorkflowJson(path.join(base, orphan.runId), orphan);
     persistWorkflowJson(path.join(base, registered.runId), registered);
     markWorkflowJobRegistered(registered.runId);
-    const recovered = recoverInterruptedWorkflowJobs(base, { currentPid: process.pid });
-    assert.deepEqual(recovered.map((item) => item.runId), [orphan.runId]);
+    const recovered = recoverInterruptedWorkflowJobs(base, {
+      currentPid: process.pid,
+    });
+    assert.deepEqual(
+      recovered.map((item) => item.runId),
+      [orphan.runId],
+    );
     assert.equal(
       JSON.parse(
-        readFileSync(path.join(base, registered.runId, "workflow.json"), "utf8"),
+        readFileSync(
+          path.join(base, registered.runId, "workflow.json"),
+          "utf8",
+        ),
       ).status,
       "running",
     );

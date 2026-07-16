@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderHeader } from "./flow-title.ts";
-import { boundTropeResult, validateTropeTarget } from "./trope-cua.ts";
+import { renderHeader } from "../flow-title.ts";
+import { boundTropeResult, validateTropeTarget } from "../trope-cua.ts";
 
 test("flow title truncates every header line to the render width", () => {
   const ctx = {
@@ -20,7 +20,10 @@ test("flow title truncates every header line to the render width", () => {
 
 test("Trope window operations require an explicit pid/window_id pair", () => {
   for (const tool of ["get_window_state", "screenshot", "click"] as const) {
-    assert.throws(() => validateTropeTarget({ tool, args: {} }), /requires.*pid/);
+    assert.throws(
+      () => validateTropeTarget({ tool, args: {} }),
+      /requires.*pid/,
+    );
     assert.throws(
       () => validateTropeTarget({ tool, args: { pid: 1 } }),
       /window_id/,
@@ -60,5 +63,7 @@ test("Trope result bounds text, images, controls, and structured details in aggr
     bounded.content.filter((block) => block.type === "image").length,
     4,
   );
-  assert.ok(Buffer.byteLength(JSON.stringify(bounded.details), "utf8") < 20 * 1024);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(bounded.details), "utf8") < 20 * 1024,
+  );
 });

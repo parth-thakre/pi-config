@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --experimental-strip-types extensions/*.test.ts extensions/background-terminals/*.test.ts extensions/file-search/*.test.ts extensions/firecrawl-search/*.test.ts extensions/shared/*.test.ts extensions/subagents/manager.test.ts extensions/subagents/result-delivery.test.ts extensions/workflows/*.test.ts",
+    "test": "node --test --experimental-strip-types extensions/background-terminals/*.test.ts extensions/file-search/*.test.ts extensions/firecrawl-search/*.test.ts extensions/shared/*.test.ts extensions/subagents/manager.test.ts extensions/subagents/result-delivery.test.ts extensions/workflows/*.test.ts",
     "check": "tsc --noEmit -p tsconfig.davis.json",
     "format:check": "prettier --check \"extensions/{background-terminals,shared,subagents,workflows}/**/*.{ts,cjs}\""
   },

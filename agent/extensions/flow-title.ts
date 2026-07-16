@@ -1,11 +1,11 @@
 import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join } from "node:path";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 const RESET = "\x1b[0m";
 type RGB = [number, number, number];
@@ -64,8 +64,14 @@ function gradientText(text: string) {
 }
 
 function center(text: string, width: number) {
-	const pad = Math.floor((width - visibleWidth(text)) / 2);
-	return pad > 0 ? " ".repeat(pad) + text : text;
+	const safeWidth = Math.max(0, width);
+	const clipped = truncateToWidth(text, safeWidth, "");
+	const pad = Math.floor((safeWidth - visibleWidth(clipped)) / 2);
+	return truncateToWidth(
+		pad > 0 ? " ".repeat(pad) + clipped : clipped,
+		safeWidth,
+		"",
+	);
 }
 
 function modelName(ctx: ExtensionContext) {
@@ -117,7 +123,7 @@ function pill(label: string, color: RGB, items: string[]): string {
 	return fg(color, label) + " " + shown.map((i) => fg(MUTED, i)).join(fg(MUTED, "  "));
 }
 
-function renderHeader(width: number, ctx: ExtensionContext): string[] {
+export function renderHeader(width: number, ctx: ExtensionContext): string[] {
 	const provider = providerName(ctx);
 	return [
 		"",

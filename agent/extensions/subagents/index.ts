@@ -39,6 +39,7 @@ import {
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { createDelegatedCostAccounting } from "../shared/delegated-cost.ts";
+import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import {
   formatElapsed,
   latestText,
@@ -524,16 +525,25 @@ export default function (pi: ExtensionAPI) {
       };
       const failed = details.status === "error";
       const icon = failed ? theme.fg("error", "x") : theme.fg("success", "■");
+      const displayId = sanitizeTerminalText(details.id ?? "?").replaceAll(
+        "\n",
+        " ",
+      );
+      const displayTitle = sanitizeTerminalText(details.title ?? "").replaceAll(
+        "\n",
+        " ",
+      );
       const header =
         `${icon} ` +
-        theme.fg("accent", theme.bold(`subagent ${details.id ?? "?"}`)) +
+        theme.fg("accent", theme.bold(`subagent ${displayId}`)) +
         theme.fg(
           "muted",
-          ` · ${details.title ?? ""} · ${failed ? "failed" : "finished"}`,
+          ` · ${displayTitle} · ${failed ? "failed" : "finished"}`,
         );
 
-      const content =
-        typeof message.content === "string" ? message.content : "";
+      const content = sanitizeTerminalText(
+        typeof message.content === "string" ? message.content : "",
+      );
       // Remove only the summary line. The following Error line (when present)
       // is part of the actual result and must remain visible.
       const body = content.split("\n").slice(1).join("\n").trim();

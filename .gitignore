@@ -8,9 +8,10 @@ trust.json
 *secret*
 
 # Session and runtime data
-sessions/
-workflows/
-pi-acp/
+/agent/sessions/
+/agent/workflows/
+/agent/wt/
+/agent/pi-acp/
 
 # Dependencies and generated caches
 node_modules/

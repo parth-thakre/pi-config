@@ -33,6 +33,7 @@ import type {
   SubagentSnapshot,
   SubagentStatus,
   TranscriptItem,
+  TranscriptPart,
 } from "./domain.ts";
 import {
   BackendUnavailableError,
@@ -40,14 +41,64 @@ import {
   SendError,
   SpawnError,
 } from "./domain.ts";
+import { boundInitialTail } from "./bounds.ts";
 
 export const MAX_RUNNING = 4;
 export const MAX_TRACKED = 64;
 const STOP_TIMEOUT_MS = 5_000;
 const ERROR_TEXT_MAX_LENGTH = 4_096;
+const FINAL_TEXT_MAX_BYTES = 128 * 1024;
+const LIVE_ASSISTANT_MAX_BYTES = 64 * 1024;
+const TRANSCRIPT_MAX_ENTRIES = 256;
+const TRANSCRIPT_INITIAL_ENTRIES = 24;
+const TRANSCRIPT_MAX_BYTES = 512 * 1024;
+const TRANSCRIPT_FIELD_MAX_BYTES = 16 * 1024;
+const TRANSCRIPT_PART_MAX_BYTES = 8 * 1024;
+const TRANSCRIPT_PART_MAX_COUNT = 32;
+const PREVIEW_MAX_BYTES = 4 * 1024;
+const QUEUED_MAX_ENTRIES = 32;
+const QUEUED_TEXT_MAX_BYTES = 8 * 1024;
 
 function bounded(text: string) {
-  return text.slice(0, ERROR_TEXT_MAX_LENGTH);
+  return boundInitialTail(text, ERROR_TEXT_MAX_LENGTH);
+}
+
+function boundPart(part: TranscriptPart): TranscriptPart {
+  if (part.type === "text" || part.type === "thinking") {
+    return {
+      ...part,
+      text: boundInitialTail(part.text, TRANSCRIPT_PART_MAX_BYTES),
+    };
+  }
+  return {
+    ...part,
+    name: boundInitialTail(part.name, 512),
+    argsPreview: part.argsPreview
+      ? boundInitialTail(part.argsPreview, PREVIEW_MAX_BYTES)
+      : undefined,
+  };
+}
+
+function boundTranscriptItem(item: TranscriptItem): TranscriptItem {
+  if (item.kind === "user") {
+    return {
+      kind: "user",
+      text: boundInitialTail(item.text, TRANSCRIPT_FIELD_MAX_BYTES),
+    };
+  }
+  if (item.kind === "assistant") {
+    return {
+      kind: "assistant",
+      parts: item.parts.slice(0, TRANSCRIPT_PART_MAX_COUNT).map(boundPart),
+    };
+  }
+  return {
+    ...item,
+    name: boundInitialTail(item.name, 512),
+    outputPreview: item.outputPreview
+      ? boundInitialTail(item.outputPreview, PREVIEW_MAX_BYTES)
+      : undefined,
+  };
 }
 
 // --- Internal state -----------------------------------------------------------
@@ -79,6 +130,7 @@ interface Entry {
   scope: Scope.Closeable;
   pump?: Fiber.Fiber<void>;
   liveToolMap: Map<string, LiveToolState>;
+  transcriptBytes: number;
   /** Idle restart dispatched but RunStarted not folded yet; counts as running
    * so concurrent restarts cannot race past the cap. */
   restarting?: boolean;
@@ -246,6 +298,30 @@ const makeManager = Effect.gen(function* () {
     }
   };
 
+  const appendTranscript = (entry: Entry, item: TranscriptItem) => {
+    const boundedItem = boundTranscriptItem(item);
+    entry.snapshot.transcript.push(boundedItem);
+    entry.transcriptBytes += Buffer.byteLength(
+      JSON.stringify(boundedItem),
+      "utf8",
+    );
+    while (
+      entry.snapshot.transcript.length > TRANSCRIPT_MAX_ENTRIES ||
+      entry.transcriptBytes > TRANSCRIPT_MAX_BYTES
+    ) {
+      const index = Math.min(
+        TRANSCRIPT_INITIAL_ENTRIES,
+        entry.snapshot.transcript.length - 1,
+      );
+      const [removed] = entry.snapshot.transcript.splice(index, 1);
+      if (!removed) break;
+      entry.transcriptBytes -= Buffer.byteLength(
+        JSON.stringify(removed),
+        "utf8",
+      );
+    }
+  };
+
   const settle = (entry: Entry, outcome: RunOutcome) => {
     const s = entry.snapshot;
     entry.restarting = false;
@@ -255,18 +331,24 @@ const makeManager = Effect.gen(function* () {
       case "Completed":
         s.status = "done";
         s.errorText = undefined;
-        s.finalText = outcome.finalText;
+        s.finalText = boundInitialTail(outcome.finalText, FINAL_TEXT_MAX_BYTES);
         break;
       case "Failed":
         s.status = "error";
         s.errorText = bounded(outcome.errorText);
         // Never let a failed run report the previous run's successful output.
-        s.finalText = outcome.partialText ?? "";
+        s.finalText = boundInitialTail(
+          outcome.partialText ?? "",
+          FINAL_TEXT_MAX_BYTES,
+        );
         break;
       case "Interrupted":
         s.status = "error";
         s.errorText = "Run was aborted";
-        s.finalText = outcome.partialText ?? "";
+        s.finalText = boundInitialTail(
+          outcome.partialText ?? "",
+          FINAL_TEXT_MAX_BYTES,
+        );
         break;
     }
     s.liveAssistant = undefined;
@@ -297,26 +379,40 @@ const makeManager = Effect.gen(function* () {
         settle(entry, event.outcome);
         return; // settle() already notified
       case "UserMessage":
-        s.transcript.push({ kind: "user", text: event.text });
+        appendTranscript(entry, { kind: "user", text: event.text });
         break;
       case "AssistantDelta": {
         const live = s.liveAssistant ?? { text: "", thinking: "" };
         s.liveAssistant =
           event.kind === "text"
-            ? { ...live, text: live.text + event.delta }
-            : { ...live, thinking: live.thinking + event.delta };
+            ? {
+                ...live,
+                text: boundInitialTail(
+                  live.text + event.delta,
+                  LIVE_ASSISTANT_MAX_BYTES,
+                ),
+              }
+            : {
+                ...live,
+                thinking: boundInitialTail(
+                  live.thinking + event.delta,
+                  LIVE_ASSISTANT_MAX_BYTES,
+                ),
+              };
         break;
       }
       case "AssistantMessage":
-        s.transcript.push({ kind: "assistant", parts: event.parts });
+        appendTranscript(entry, { kind: "assistant", parts: event.parts });
         s.liveAssistant = undefined;
         s.turns++;
         break;
       case "ToolStart":
         entry.liveToolMap.set(event.toolId, {
           toolId: event.toolId,
-          name: event.name,
-          argsPreview: event.argsPreview,
+          name: boundInitialTail(event.name, 512),
+          argsPreview: event.argsPreview
+            ? boundInitialTail(event.argsPreview, PREVIEW_MAX_BYTES)
+            : undefined,
         });
         s.liveTools = [...entry.liveToolMap.values()];
         break;
@@ -325,7 +421,9 @@ const makeManager = Effect.gen(function* () {
         if (current) {
           entry.liveToolMap.set(event.toolId, {
             ...current,
-            outputPreview: event.outputPreview ?? current.outputPreview,
+            outputPreview: event.outputPreview
+              ? boundInitialTail(event.outputPreview, PREVIEW_MAX_BYTES)
+              : current.outputPreview,
           });
           s.liveTools = [...entry.liveToolMap.values()];
         }
@@ -334,7 +432,7 @@ const makeManager = Effect.gen(function* () {
       case "ToolEnd":
         entry.liveToolMap.delete(event.toolId);
         s.liveTools = [...entry.liveToolMap.values()];
-        s.transcript.push({
+        appendTranscript(entry, {
           kind: "toolResult",
           toolId: event.toolId,
           name: event.name,
@@ -343,7 +441,10 @@ const makeManager = Effect.gen(function* () {
         });
         break;
       case "QueueChanged":
-        s.queued = event.queued;
+        s.queued = event.queued.slice(-QUEUED_MAX_ENTRIES).map((queued) => ({
+          ...queued,
+          text: boundInitialTail(queued.text, QUEUED_TEXT_MAX_BYTES),
+        }));
         break;
       case "UsageChanged":
         s.usage = {
@@ -353,7 +454,19 @@ const makeManager = Effect.gen(function* () {
         };
         break;
       case "MetaChanged":
-        s.meta = { ...s.meta, ...event.meta };
+        s.meta = {
+          ...s.meta,
+          ...event.meta,
+          modelLabel: event.meta.modelLabel
+            ? boundInitialTail(event.meta.modelLabel, 1_024)
+            : (event.meta.modelLabel ?? s.meta.modelLabel),
+          sessionFilePath: event.meta.sessionFilePath
+            ? boundInitialTail(event.meta.sessionFilePath, 4_096)
+            : (event.meta.sessionFilePath ?? s.meta.sessionFilePath),
+          nativeSessionId: event.meta.nativeSessionId
+            ? boundInitialTail(event.meta.nativeSessionId, 1_024)
+            : (event.meta.nativeSessionId ?? s.meta.nativeSessionId),
+        };
         break;
       case "BackendError":
         s.errorText = bounded(event.message);
@@ -410,17 +523,29 @@ const makeManager = Effect.gen(function* () {
 
         const id = `sa-${++counter}`;
         const meta = yield* session.meta;
+        const boundedMeta: SubagentMeta = {
+          ...meta,
+          modelLabel: meta.modelLabel
+            ? boundInitialTail(meta.modelLabel, 1_024)
+            : undefined,
+          sessionFilePath: meta.sessionFilePath
+            ? boundInitialTail(meta.sessionFilePath, 4_096)
+            : undefined,
+          nativeSessionId: meta.nativeSessionId
+            ? boundInitialTail(meta.nativeSessionId, 1_024)
+            : undefined,
+        };
         const entry: Entry = {
           snapshot: {
             id,
             backend: backendName,
-            title: task.title,
-            prompt: task.prompt,
-            cwd: task.cwd,
+            title: boundInitialTail(task.title, 4_096),
+            prompt: boundInitialTail(task.prompt, 64 * 1024),
+            cwd: boundInitialTail(task.cwd, 4_096),
             status: "running",
             createdAt: Date.now(),
-            meta,
-            usage: { contextWindow: meta.contextWindow },
+            meta: boundedMeta,
+            usage: { contextWindow: boundedMeta.contextWindow },
             transcript: [],
             liveTools: [],
             queued: [],
@@ -430,6 +555,7 @@ const makeManager = Effect.gen(function* () {
           session,
           scope,
           liveToolMap: new Map(),
+          transcriptBytes: 0,
         };
         entries.set(id, entry);
 

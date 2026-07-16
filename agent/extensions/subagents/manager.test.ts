@@ -102,6 +102,22 @@ test("stub subagent completes and delivers a final result", async () => {
   });
 });
 
+test("snapshot transcript fields retain a bounded initial-plus-tail view", async () => {
+  await withManager(async (manager, runtime) => {
+    const prompt = `initial-${"x".repeat(40_000)}-tail`;
+    const snap = await runTool(runtime, manager.spawn("claude", task(prompt)));
+    await runTool(runtime, manager.waitFor([snap.id]));
+    const done = manager.view.get(snap.id)!;
+    const user = done.transcript.find((item) => item.kind === "user");
+    assert.ok(user?.kind === "user");
+    assert.ok(Buffer.byteLength(user.text, "utf8") <= 16 * 1024);
+    assert.match(user.text, /^initial-/);
+    assert.match(user.text, /-tail$/);
+    assert.match(user.text, /bytes omitted/);
+    assert.ok(Buffer.byteLength(done.finalText, "utf8") <= 128 * 1024);
+  });
+});
+
 test("FAIL: prompts settle as errors; unconsumed settles are delivered", async () => {
   await withManager(async (manager, runtime) => {
     const settled: Array<{ id: string; consumed: boolean }> = [];

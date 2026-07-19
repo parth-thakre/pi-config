@@ -1,130 +1,142 @@
+/** All model-facing strings for the background-terminals tools. */
+
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
   formatSize,
   truncateTail,
 } from "@earendil-works/pi-coding-agent";
-import { sanitizeTerminalText } from "../../shared/terminal-text.ts";
-import {
-  formatElapsed,
-  formatExit,
-  type OutputView,
-  type TerminalSnapshot,
-} from "./domain.ts";
+import { formatElapsed, formatExit, type TerminalSnapshot } from "./domain.ts";
 import { MAX_RUNNING, type KillResult } from "./manager.ts";
 
+/** bg_status stdout tail. */
 export const STATUS_STDOUT_MAX = 16 * 1024;
+/** bg_status stderr tail. */
 export const STATUS_STDERR_MAX = 8 * 1024;
+/** Completion follow-up stdout tail. Keep this concise; /ps has the detailed view. */
 export const RESULT_STDOUT_MAX = 8 * 1024;
+/** Completion follow-up stderr tail. Keep this concise; /ps has the detailed view. */
 export const RESULT_STDERR_MAX = 4 * 1024;
+const STATUS_STDOUT_MAX_LINES = 400;
+const STATUS_STDERR_MAX_LINES = 200;
+const RESULT_STDOUT_MAX_LINES = 40;
+const RESULT_STDERR_MAX_LINES = 20;
 
 export const BG_START_TOOL_DESCRIPTION =
-  "Start a long-running command in native PowerShell 7 on Windows. It is spawned directly as pwsh.exe -NoLogo -NoProfile -NonInteractive -Command <wrapper>, receives no stdin, and is killed when this Pi session reloads, switches, forks, or exits. " +
-  `Returns immediately and reports completion exactly once. Status output is tail-bounded (stdout ${formatSize(STATUS_STDOUT_MAX)}, stderr ${formatSize(STATUS_STDERR_MAX)}); raw capture uses a bounded memory tail plus bounded rotating disk spill. Max ${MAX_RUNNING} running terminals.`;
+  "Start a long-running shell command as a background terminal (executed via the platform shell — sh -c on POSIX, cmd.exe /d /s /c on Windows). " +
+  "Fire-and-forget: this returns immediately with an id, and you get a message with the final output when the process exits. " +
+  "The process receives NO stdin (immediate EOF) and there is no way to send input later — interactive commands will not work; use bg_kill to stop a stuck one. " +
+  `Terminals are session-scoped: they are killed when the session ends or reloads. Output shown to you is tail-truncated (stdout ${formatSize(STATUS_STDOUT_MAX)}, stderr ${formatSize(STATUS_STDERR_MAX)}); the full logs are captured to files and in the /ps viewer. ` +
+  `Max ${MAX_RUNNING} background terminals can run at once.`;
 
 export const BG_START_PROMPT_SNIPPET =
-  "Run a long-lived native PowerShell 7 command in the background; output is captured and completion is delivered automatically";
+  "Run a long-lived shell command in the background (dev servers, builds, watchers); output is captured and you're notified on exit";
 
 export const BG_START_PROMPT_GUIDELINES = [
-  "Use bg_start for commands expected to run long or indefinitely; use bash for quick commands.",
-  "bg_start processes receive no stdin, so never use bg_start for interactive commands.",
-  "After bg_start, continue other work; use bg_status only when current output is needed before completion.",
+  "Use bg_start for commands expected to run long or indefinitely (servers, watch modes, long builds); use the regular bash tool for quick commands.",
+  "bg_start processes receive no stdin — never start a command that requires interactive input.",
+  "After bg_start, keep working; the exit result arrives automatically. Use bg_status only when you need current output before continuing.",
 ];
 
 export const BG_START_PARAMETER_DESCRIPTIONS = {
   command:
-    "PowerShell 7 command text. Pipelines and $env:NAME expansion are supported; stdin is immediate EOF.",
-  title: "Short human-readable title for listings",
-  workingDir: "Working directory, resolved from Pi's current directory",
+    "Shell command line to run in the background (sh -c on POSIX, cmd.exe /d /s /c on Windows). It receives no stdin (EOF immediately); interactive commands will not work.",
+  title: "Short human-readable name shown in listings and the UI",
+  workingDir: "Working directory (default: current working directory)",
 };
 
 export const BG_STATUS_TOOL_DESCRIPTION =
-  "Read one background terminal's state and bounded, sanitized stdout/stderr tails.";
+  "Peek at a background terminal's status and current output (tail-truncated) without blocking. If the terminal already exited, this returns its final state.";
+
+export const BG_STATUS_PARAMETER_DESCRIPTIONS = {
+  id: 'Terminal id, e.g. "bt-1"',
+};
+
 export const BG_LIST_TOOL_DESCRIPTION =
-  "List session-scoped background terminals, including settled entries.";
+  "List all background terminals (running and settled) with pid, elapsed time, exit status, and output sizes.";
+
 export const BG_KILL_TOOL_DESCRIPTION =
-  "Stop terminal process trees with awaited taskkill /T and /T /F escalation, then report the observed final state.";
+  "Stop one or more running background terminals (SIGTERM to the whole process tree, escalating to SIGKILL). Returns each terminal's final state; already-settled ids are reported as such.";
 
-function oneLine(text: string): string {
-  return sanitizeTerminalText(text).replaceAll("\n", " ").trim();
+export const BG_KILL_PARAMETER_DESCRIPTIONS = {
+  ids: 'Terminal ids to stop, e.g. ["bt-1"]',
+};
+
+export function buildStartResult(snap: TerminalSnapshot) {
+  return (
+    `Started background terminal ${snap.id} "${snap.title}" (pid ${snap.pid ?? "?"}, ${snap.cwd}).\n` +
+    `It runs in the background with no stdin. You'll get a message when it exits, ` +
+    `or use bg_status(id: "${snap.id}") to peek, bg_kill to stop it, bg_list to see all.`
+  );
 }
 
-function spillDescription(view: OutputView): string {
-  if (!view.spillDirectory) return "disk spill unavailable";
-  const parts = [
-    `spill ${view.spillDirectory}`,
-    `${view.spillFiles.length} file${view.spillFiles.length === 1 ? "" : "s"}`,
-    `${formatSize(view.spillRetainedBytes)} retained`,
-    `${view.spillRotations} rotation${view.spillRotations === 1 ? "" : "s"}`,
+/** One metadata line: `bt-1 [running] "dev server" (pid 12345, 3m12s, exit -, /path)`. */
+export function describeTerminal(snap: TerminalSnapshot) {
+  const details = [
+    `pid ${snap.pid ?? "?"}`,
+    formatElapsed(snap),
+    snap.status === "running" ? "exit -" : formatExit(snap),
+    snap.cwd,
+    `stdout ${formatSize(snap.stdout.totalBytes)}, stderr ${formatSize(snap.stderr.totalBytes)}`,
   ];
-  if (view.spillDroppedBytes > 0)
-    parts.push(`${formatSize(view.spillDroppedBytes)} rotated out`);
-  if (view.spillError) parts.push(`incomplete: ${oneLine(view.spillError)}`);
-  else if (view.spillComplete) parts.push("complete");
-  else parts.push("bounded/truncated");
-  return parts.join(", ");
+  return `${snap.id} [${snap.status}] "${snap.title}" (${details.join(", ")})`;
 }
 
-export function buildStartResult(snapshot: TerminalSnapshot): string {
-  return `Started ${snapshot.id} "${oneLine(snapshot.title)}" (pid ${snapshot.pid ?? "?"}, ${oneLine(snapshot.cwd)}) in native PowerShell 7.\nNo stdin is available. Completion will be reported once; use bg_status, bg_list, or bg_kill meanwhile.`;
-}
-
-export function describeTerminal(snapshot: TerminalSnapshot): string {
-  return `${snapshot.id} [${snapshot.status}] "${oneLine(snapshot.title)}" (pid ${snapshot.pid ?? "?"}, ${formatElapsed(snapshot)}, ${formatExit(snapshot)}, stdout ${formatSize(snapshot.stdout.totalBytes)}, stderr ${formatSize(snapshot.stderr.totalBytes)}, ${oneLine(snapshot.cwd)})`;
-}
-
+/** Tail-truncated labeled output section with a pointer at the full log. */
 function outputSection(
   label: string,
-  view: OutputView,
+  view: TerminalSnapshot["stdout"],
   maxBytes: number,
   maxLines: number,
-): string {
-  if (view.totalBytes === 0)
-    return `${label}: (empty)\n[${spillDescription(view)}]`;
-  const safe = sanitizeTerminalText(view.text);
-  const truncated = truncateTail(safe, {
+) {
+  if (view.totalBytes === 0) return `${label}: (empty)`;
+  const truncation = truncateTail(view.text, {
     maxBytes: Math.min(maxBytes, DEFAULT_MAX_BYTES),
     maxLines: Math.min(maxLines, DEFAULT_MAX_LINES),
   });
-  const memoryNote =
-    view.truncatedBytes > 0
-      ? `${formatSize(view.truncatedBytes)} dropped from the in-memory head`
-      : "memory tail complete";
-  return `${label}:\n${truncated.content}\n[showing a bounded tail of ${formatSize(view.totalBytes)} raw bytes; ${memoryNote}; ${spillDescription(view)}]`;
+  let text = `${label}:\n${truncation.content}`;
+  const shownBytes = truncation.outputBytes;
+  if (truncation.truncated || view.truncatedBytes > 0) {
+    const where = view.spillPath
+      ? `Full log: ${view.spillPath}`
+      : "Full output in the /ps viewer";
+    text += `\n[${label} truncated: showing last ${formatSize(shownBytes)} of ${formatSize(view.totalBytes)}. ${where}]`;
+  }
+  return text;
 }
 
-export function buildStatusResult(snapshot: TerminalSnapshot): string {
-  let result = describeTerminal(snapshot);
-  if (snapshot.errorText) result += `\nNote: ${oneLine(snapshot.errorText)}`;
-  result += `\n\n${outputSection("stdout", snapshot.stdout, STATUS_STDOUT_MAX, 400)}`;
-  result += `\n\n${outputSection("stderr", snapshot.stderr, STATUS_STDERR_MAX, 200)}`;
-  return result;
+export function buildStatusResult(snap: TerminalSnapshot) {
+  let text = describeTerminal(snap);
+  if (snap.errorText) text += `\nError: ${snap.errorText}`;
+  text += `\n\n${outputSection("stdout", snap.stdout, STATUS_STDOUT_MAX, STATUS_STDOUT_MAX_LINES)}`;
+  text += `\n\n${outputSection("stderr", snap.stderr, STATUS_STDERR_MAX, STATUS_STDERR_MAX_LINES)}`;
+  return text;
 }
 
-export function buildTerminalResultMessage(snapshot: TerminalSnapshot): string {
-  const action =
-    snapshot.status === "killed"
-      ? "was killed"
-      : `exited (${formatExit(snapshot)})`;
-  let result = `Background terminal ${snapshot.id} "${oneLine(snapshot.title)}" ${action} after ${formatElapsed(snapshot)}.`;
-  if (snapshot.errorText) result += `\nNote: ${oneLine(snapshot.errorText)}`;
-  result += `\n\n${outputSection("stdout", snapshot.stdout, RESULT_STDOUT_MAX, 40)}`;
-  if (snapshot.stderr.totalBytes > 0)
-    result += `\n\n${outputSection("stderr", snapshot.stderr, RESULT_STDERR_MAX, 20)}`;
-  return result;
+/** The async completion follow-up injected into the model's context. */
+export function buildTerminalResultMessage(snap: TerminalSnapshot) {
+  const how =
+    snap.status === "killed" ? "was killed" : `exited (${formatExit(snap)})`;
+  let text = `Background terminal ${snap.id} "${snap.title}" ${how} after ${formatElapsed(snap)}.`;
+  if (snap.errorText) text += `\nError: ${snap.errorText}`;
+  text += `\n\n${outputSection("stdout", snap.stdout, RESULT_STDOUT_MAX, RESULT_STDOUT_MAX_LINES)}`;
+  if (snap.stderr.totalBytes > 0) {
+    text += `\n\n${outputSection("stderr", snap.stderr, RESULT_STDERR_MAX, RESULT_STDERR_MAX_LINES)}`;
+  }
+  return text;
 }
 
-export function buildKillReport(results: readonly KillResult[]): string {
+export function buildKillReport(results: ReadonlyArray<KillResult>) {
   return results
-    .map((result) => {
-      const helper = result.helpers
-        .map((item) => `${item.force ? "/T /F" : "/T"}: ${item.classification}`)
-        .join(", ");
-      if (result.killed)
-        return `Killed ${result.id} "${oneLine(result.title)}" (${result.exit}; ${helper || "no helper"}).`;
-      if (result.wasRunning)
-        return `${result.id} "${oneLine(result.title)}" settled naturally or could not be confirmed killed (${result.exit}; ${helper || "no helper"}).`;
-      return `${result.id} "${oneLine(result.title)}" was already ${result.status} (${result.exit}).`;
+    .map((entry) => {
+      if (entry.killed) {
+        return `Killed ${entry.id} "${entry.title}" (${entry.exit}).`;
+      }
+      if (entry.wasRunning) {
+        // The natural exit won the race with the kill signal.
+        return `${entry.id} "${entry.title}" exited on its own before the kill landed (${entry.exit}).`;
+      }
+      return `${entry.id} "${entry.title}" was already ${entry.status} (${entry.exit}).`;
     })
     .join("\n");
 }

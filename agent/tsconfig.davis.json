@@ -12,9 +12,12 @@
   },
   "include": [
     "extensions/*.ts",
+    "extensions/ask-user/**/*.ts",
     "extensions/background-terminals/**/*.ts",
     "extensions/computer-use/**/*.ts",
     "extensions/file-search/**/*.ts",
+    "extensions/model-info/**/*.ts",
+    "extensions/ui-customization/**/*.ts",
     "extensions/firecrawl-search/**/*.ts",
     "extensions/shared/**/*.ts",
     "extensions/subagents/**/*.ts",

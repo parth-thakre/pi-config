@@ -1,161 +1,103 @@
 import assert from "node:assert/strict";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { PassThrough, Writable } from "node:stream";
-import { test } from "node:test";
-import { OutputBuffer, OutputCapture, RotatingSpill } from "./src/output.ts";
+import test from "node:test";
+import { OutputBuffer } from "./src/output.ts";
 
-const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-
-test("memory tail is UTF-8 safe, maximal, and strictly bounded", () => {
-  const output = new OutputBuffer(5);
-  output.push("head");
-  output.push("éééé");
-  assert.equal(output.totalBytes, 12);
-  assert.equal(output.text(), "éé");
-  assert.equal(Buffer.byteLength(output.text()), 4);
-  assert.equal(output.truncatedBytes, 8);
-
-  const splitChunks = new OutputBuffer(5);
-  splitChunks.push("abcd");
-  splitChunks.push("EFGH");
-  assert.equal(splitChunks.text(), "dEFGH");
-  assert.equal(Buffer.byteLength(splitChunks.text()), 5);
-  assert.equal(splitChunks.truncatedBytes, 3);
+test("push/view roundtrip preserves text and counts bytes", () => {
+  const buf = new OutputBuffer(1024);
+  buf.push("hello ");
+  buf.push("world\n");
+  const view = buf.view();
+  assert.equal(view.text, "hello world\n");
+  assert.equal(view.totalBytes, Buffer.byteLength("hello world\n"));
+  assert.equal(view.truncatedBytes, 0);
 });
 
-test("rotating spill remains bounded and reports rotation/truncation honestly", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bt-output-"));
-  const source = new PassThrough();
-  const capture = new OutputCapture(
-    source,
-    new OutputBuffer(16),
-    new RotatingSpill({
-      directory,
-      stem: "stdout",
-      segmentBytes: 32,
-      maxFiles: 2,
-      highWaterMark: 8,
-    }),
-    () => {},
-  );
-  source.write("0123456789".repeat(20));
-  source.end();
-  await tick();
-  await capture.flush(2_000);
-  const view = capture.view();
-  assert.equal(view.totalBytes, 200);
-  assert.ok(Buffer.byteLength(view.text) <= 16);
-  assert.ok(view.truncatedBytes > 0);
-  assert.ok(view.spillFiles.length <= 2);
-  assert.ok(view.spillRetainedBytes <= 64);
-  assert.ok(view.spillDroppedBytes > 0);
-  assert.ok(view.spillRotations > 0);
-  assert.equal(view.spillComplete, false);
-  assert.equal(
-    view.spillFiles.every((file) => fs.existsSync(file)),
-    true,
-  );
-  fs.rmSync(directory, { recursive: true, force: true });
+test("head chunks are evicted past the cap and accounted as truncated", () => {
+  const buf = new OutputBuffer(10);
+  buf.push("aaaa"); // 4 bytes
+  buf.push("bbbb"); // 8 bytes
+  buf.push("cccc"); // 12 bytes -> evict "aaaa" (8 retained)
+  const view = buf.view();
+  assert.equal(view.text, "bbbbcccc");
+  assert.equal(view.totalBytes, 12);
+  assert.equal(view.truncatedBytes, 4);
 });
 
-test("write(false) pauses the matching readable and drain resumes it", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bt-pressure-"));
-  const source = new PassThrough();
-  let pauses = 0;
-  let resumes = 0;
-  const pause = source.pause.bind(source);
-  const resume = source.resume.bind(source);
-  source.pause = () => {
-    pauses++;
-    return pause();
-  };
-  source.resume = () => {
-    resumes++;
-    return resume();
-  };
-  const capture = new OutputCapture(
-    source,
-    new OutputBuffer(64),
-    new RotatingSpill({
-      directory,
-      stem: "stdout",
-      segmentBytes: 1 << 20,
-      maxFiles: 1,
-      highWaterMark: 1,
-    }),
-    () => {},
-  );
-  resumes = 0;
-  source.write("x".repeat(128 * 1024));
-  source.end();
-  await tick();
-  await capture.flush(2_000);
-  assert.ok(pauses >= 1, `expected a backpressure pause, got ${pauses}`);
-  assert.ok(resumes >= 1, `expected resume after drain, got ${resumes}`);
-  fs.rmSync(directory, { recursive: true, force: true });
+test("a single chunk larger than the cap is trimmed to its tail — retention stays bounded", () => {
+  const buf = new OutputBuffer(4);
+  buf.push("0123456789");
+  // Only the newest cap-worth of bytes is retained; the head is truncated.
+  assert.equal(buf.view().text, "6789");
+  assert.equal(buf.view().totalBytes, 10);
+  assert.equal(buf.view().truncatedBytes, 6);
+  buf.push("x");
+  // "6789" + "x" exceeds the cap; the older whole chunk is evicted.
+  assert.equal(buf.view().text, "x");
+  assert.equal(buf.view().totalBytes, 11);
+  assert.equal(buf.view().truncatedBytes, 10);
 });
 
-test("spill stream errors and flush deadlines settle within bounds", async () => {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bt-errors-"));
-  class ErrorWritable extends Writable {
-    override _write(
-      _chunk: Buffer,
-      _encoding: BufferEncoding,
-      callback: (error?: Error | null) => void,
-    ): void {
-      callback(new Error("disk failed"));
-    }
-  }
-  const errorSource = new PassThrough();
-  const errored = new RotatingSpill({
-    directory,
-    stem: "error",
-    segmentBytes: 1024,
-    maxFiles: 1,
-    createWriteStream: (() =>
-      new ErrorWritable()) as unknown as typeof fs.createWriteStream,
-  });
-  errored.write("data", errorSource);
-  await tick();
-  await errored.flush(100);
-  assert.match(errored.state().spillError ?? "", /disk failed/);
-  assert.equal(errored.state().spillComplete, false);
+test("an oversized chunk evicts everything retained before it", () => {
+  const buf = new OutputBuffer(8);
+  buf.push("abcd");
+  buf.push("0123456789"); // 10 bytes > cap: "abcd" evicted, chunk tail-trimmed
+  const view = buf.view();
+  assert.equal(view.text, "23456789");
+  assert.equal(view.totalBytes, 14);
+  assert.equal(view.truncatedBytes, 6);
+});
 
-  class StuckWritable extends Writable {
-    override _write(
-      _chunk: Buffer,
-      _encoding: BufferEncoding,
-      _callback: (error?: Error | null) => void,
-    ): void {
-      // Intentionally never completes, forcing the bounded flush path.
-    }
-  }
-  const source = new PassThrough();
-  let resumed = 0;
-  const resume = source.resume.bind(source);
-  source.resume = () => {
-    resumed++;
-    return resume();
-  };
-  const spill = new RotatingSpill({
-    directory,
-    stem: "stuck",
-    segmentBytes: 1024,
-    maxFiles: 1,
-    highWaterMark: 1,
-    createWriteStream: (() =>
-      new StuckWritable({
-        highWaterMark: 1,
-      })) as unknown as typeof fs.createWriteStream,
-  });
-  spill.write("firehose", source);
-  const started = Date.now();
-  await spill.flush(80);
-  assert.ok(Date.now() - started < 500);
-  assert.equal(spill.state().spillComplete, false);
-  assert.match(spill.state().spillError ?? "", /flush exceeded/);
-  assert.ok(resumed >= 1);
-  fs.rmSync(directory, { recursive: true, force: true });
+test("an oversized chunk cut lands on a UTF-8 code point boundary", () => {
+  const buf = new OutputBuffer(5);
+  buf.push("ééééé"); // 10 bytes; naive cut at byte 5 would split an é
+  const view = buf.view();
+  assert.equal(view.text, "éé"); // 4 bytes retained (5 would split)
+  assert.equal(view.totalBytes, 10);
+  assert.equal(view.truncatedBytes, 6);
+  assert.ok(!view.text.includes("�"));
+});
+
+test("spill receives the complete oversized chunk before trimming", () => {
+  const spilled: string[] = [];
+  const buf = new OutputBuffer(4, (chunk) => spilled.push(chunk));
+  buf.push("0123456789");
+  assert.deepEqual(spilled, ["0123456789"]);
+  assert.equal(buf.view().text, "6789");
+});
+
+test("byte accounting uses UTF-8 byte length, not string length", () => {
+  const buf = new OutputBuffer(1024);
+  buf.push("héllo"); // é is 2 bytes
+  assert.equal(buf.view().totalBytes, 6);
+});
+
+test("multibyte chunks are never split by eviction", () => {
+  const buf = new OutputBuffer(8);
+  buf.push("ééé"); // 6 bytes
+  buf.push("üüü"); // 6 bytes -> evicts the first chunk whole
+  const view = buf.view();
+  assert.equal(view.text, "üüü");
+  assert.equal(view.truncatedBytes, 6);
+});
+
+test("spill callback receives every chunk in order, even after eviction", () => {
+  const spilled: string[] = [];
+  const buf = new OutputBuffer(4, (chunk) => spilled.push(chunk));
+  buf.push("aaaa");
+  buf.push("bbbb");
+  buf.push("cccc");
+  assert.deepEqual(spilled, ["aaaa", "bbbb", "cccc"]);
+  assert.equal(buf.view().text, "cccc");
+});
+
+test("view text is cached between pushes and version increments per push", () => {
+  const buf = new OutputBuffer(1024);
+  buf.push("a");
+  const first = buf.view();
+  const second = buf.view();
+  assert.equal(first.text, second.text);
+  const versionBefore = buf.version;
+  buf.push("b");
+  assert.equal(buf.version, versionBefore + 1);
+  assert.equal(buf.view().text, "ab");
 });

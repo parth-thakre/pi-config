@@ -1,120 +1,79 @@
-import {
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  truncateTail,
-} from "@earendil-works/pi-coding-agent";
+/**
+ * Output rendering for the /ps detail view: turns a captured stream's text
+ * into sanitized, wrapped display lines. Sanitization happens here — at
+ * render time, never at capture time — because raw ANSI/control characters
+ * desync the TUI renderer and smear the overlay.
+ */
+
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { sanitizeTerminalText } from "../../../shared/terminal-text.ts";
-import type { TerminalSummary } from "../domain.ts";
 
-export const RENDER_MAX_BYTES = 24 * 1024;
-export const RENDER_MAX_LINES = 500;
+// OSC strings (window titles, hyperlinks, etc.) end in BEL or ST. Strip them
+// before the generic escape/control pass so their payload never becomes
+// visible text after only the leading ESC byte is removed.
+// eslint-disable-next-line no-control-regex
+const OSC_PATTERN =
+  /(?:\u001b\]|\u009d)(?:[^\u0007\u001b\u009c]|\u001b(?!\\))*(?:\u0007|\u001b\\|\u009c)/g;
+// Standards-shaped CSI matcher: parameters are deliberately unbounded; a
+// five-digit cursor movement is still one control sequence, not visible text.
+// eslint-disable-next-line no-control-regex
+const CSI_PATTERN = /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g;
+// Remaining two-byte/charset escape forms (for example ESC ( 0).
+// eslint-disable-next-line no-control-regex
+const ESCAPE_PATTERN = /\u001b(?:[()][0-2A-Z]|[ -/]*[@-~])/g;
 
-export function oneLine(text: string): string {
-  return sanitizeTerminalText(text).replaceAll("\n", " ").trim();
+/**
+ * Strip raw ANSI codes, expand tabs, and drop control chars. Terminal-expanded
+ * tabs (and stray escapes) make lines wider than the width we declare to the
+ * TUI, which desyncs the renderer.
+ */
+export function sanitizeText(text: string) {
+  return text
+    .replace(OSC_PATTERN, "")
+    .replace(CSI_PATTERN, "")
+    .replace(ESCAPE_PATTERN, "")
+    .replaceAll("\t", "  ")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 }
 
-export function buildOutputLines(rawText: string, width: number): string[] {
-  const safeWidth = Math.max(1, width);
-  const safe = sanitizeTerminalText(rawText);
-  const lines: string[] = [];
-  for (const line of safe.split("\n")) {
-    if (!line) lines.push("");
-    else lines.push(...wrapTextWithAnsi(line, safeWidth));
+/** Split, sanitize, and wrap a stream's text into display lines. */
+export function buildOutputLines(text: string, width: number) {
+  const safeWidth = Math.max(10, width);
+  const out: string[] = [];
+  for (const raw of text.split("\n")) {
+    // Carriage-return progress lines (npm, cargo): keep only the final state.
+    const segments = raw.split("\r");
+    const finalSegment = segments.at(-1) ?? "";
+    const lastSegment =
+      finalSegment || [...segments].reverse().find((segment) => segment) || "";
+    const clean = sanitizeText(lastSegment);
+    if (clean.length === 0) {
+      out.push("");
+      continue;
+    }
+    out.push(...wrapTextWithAnsi(clean, safeWidth));
   }
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
+  // Drop one trailing empty line from a trailing "\n" so the tail pin sits
+  // on the last real output line.
+  if (out.length > 0 && out[out.length - 1] === "") out.pop();
+  return out;
 }
 
+/**
+ * Cache of wrapped lines keyed by (buffer version, width): a chatty process
+ * bumps the version per chunk, but renders between chunks (1Hz elapsed ticks,
+ * scrolling) must not re-wrap megabytes.
+ */
 export function createOutputLineCache() {
-  let version = -1;
-  let width = -1;
+  let key: string | undefined;
   let lines: string[] = [];
   return {
-    get(rawText: string, nextVersion: number, nextWidth: number): string[] {
-      if (version !== nextVersion || width !== nextWidth) {
-        version = nextVersion;
-        width = nextWidth;
-        lines = buildOutputLines(rawText, nextWidth);
+    get(text: string, version: number, width: number) {
+      const nextKey = `${version}:${width}`;
+      if (key !== nextKey) {
+        key = nextKey;
+        lines = buildOutputLines(text, width);
       }
       return lines;
     },
-    clear(): void {
-      version = -1;
-      width = -1;
-      lines = [];
-    },
   };
-}
-
-function textContent(result: { content?: readonly unknown[] }): string {
-  return (result.content ?? [])
-    .map((item) =>
-      item &&
-      typeof item === "object" &&
-      (item as { type?: unknown }).type === "text"
-        ? String((item as { text?: unknown }).text ?? "")
-        : "",
-    )
-    .filter(Boolean)
-    .join("\n");
-}
-
-export function boundedSanitizedRendererOutput(text: string): string {
-  return truncateTail(sanitizeTerminalText(text), {
-    maxBytes: Math.min(RENDER_MAX_BYTES, DEFAULT_MAX_BYTES),
-    maxLines: Math.min(RENDER_MAX_LINES, DEFAULT_MAX_LINES),
-  }).content;
-}
-
-export interface BackgroundToolDetails {
-  summary?: TerminalSummary;
-  summaries?: readonly TerminalSummary[];
-}
-
-/** Collapsed result rows intentionally expose only title/id/state/elapsed. */
-export function collapsedToolResult(
-  details: BackgroundToolDetails | undefined,
-): string {
-  const summaries =
-    details?.summaries ?? (details?.summary ? [details.summary] : []);
-  return summaries
-    .map(
-      (summary) =>
-        `${oneLine(summary.title)} · ${oneLine(summary.id)} · ${oneLine(summary.status)} · ${oneLine(summary.elapsed)}`,
-    )
-    .join("\n");
-}
-
-export function renderToolCallText(
-  name: "bg_start" | "bg_status" | "bg_list" | "bg_kill",
-  args: Record<string, unknown>,
-  expanded: boolean,
-): string {
-  if (name === "bg_start") {
-    const title = oneLine(String(args.title ?? "terminal"));
-    return expanded
-      ? `bg_start · ${title}\n${boundedSanitizedRendererOutput(String(args.command ?? ""))}`
-      : `bg_start · ${title}`;
-  }
-  if (name === "bg_status")
-    return `bg_status · ${oneLine(String(args.id ?? "?"))}`;
-  if (name === "bg_kill") {
-    const ids = Array.isArray(args.ids)
-      ? args.ids.map((id) => oneLine(String(id))).join(", ")
-      : "?";
-    return `bg_kill · ${ids}`;
-  }
-  return "bg_list";
-}
-
-export function renderToolResultText(
-  result: { content?: readonly unknown[]; details?: unknown },
-  expanded: boolean,
-): string {
-  const details = result.details as BackgroundToolDetails | undefined;
-  const collapsed = collapsedToolResult(details);
-  if (!expanded) return collapsed || "background terminal";
-  const output = boundedSanitizedRendererOutput(textContent(result));
-  return [collapsed, output].filter(Boolean).join("\n");
 }

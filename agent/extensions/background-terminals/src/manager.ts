@@ -1,46 +1,170 @@
-import {
-  spawn,
-  spawnSync,
-  type ChildProcess,
-  type SpawnOptions,
-} from "node:child_process";
+/**
+ * TerminalManager — owns the registry of running/settled background
+ * terminals.
+ *
+ * Each terminal is a raw `node:child_process` spawn (own process group on
+ * POSIX, stdin ignored) whose stdout/stderr 'data' callbacks fold into two
+ * bounded OutputBuffers. Closing a terminal's scope kills the whole process
+ * tree (SIGTERM → SIGKILL escalation).
+ *
+ * The manager also exposes a synchronous `TerminalReadModel` so the
+ * imperative TUI components (which render synchronously) can read snapshots
+ * and issue fire-and-forget kills without touching the Effect runtime.
+ */
+
+import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Readable } from "node:stream";
 import {
+  Context,
+  Deferred,
+  Effect,
+  Exit,
+  FiberSet,
+  Layer,
+  Scope,
+} from "effect";
+import {
+  ConcurrencyLimitError,
   formatExit,
+  SpawnError,
+  UnknownTerminalError,
   type TerminalSnapshot,
   type TerminalStatus,
 } from "./domain.ts";
-import { OutputBuffer, OutputCapture, RotatingSpill } from "./output.ts";
+import { OutputBuffer } from "./output.ts";
 
 export const MAX_RUNNING = 8;
 export const MAX_TRACKED = 32;
+const MAX_SETTLED_HISTORY = MAX_TRACKED * 4;
+/** In-memory retained cap per stream; the spill file keeps the full capture. */
 export const RETAINED_PER_STREAM = 2 * 1024 * 1024;
-export const SPILL_SEGMENT_BYTES = 2 * 1024 * 1024;
-export const SPILL_MAX_FILES = 4;
+const STOP_TIMEOUT_MS = 5_000;
+/** SIGTERM is normally enough; the second deadline covers a wedged process. */
+const FORCE_KILL_AFTER_MS = 2_000;
+/** After termination, how long to wait for the natural close→flush→settle
+ * path before force-settling (a grandchild can hold the stdio pipes open). */
+const SETTLE_GRACE_MS = 1_000;
+/** Bound on waiting for spill WriteStreams to flush before settling; a hung
+ * filesystem must not leave an exited entry "running" (and kill() waiting).
+ * Terminate (≤2.5s) + settle grace (1s) + flush (1.5s) stays inside the 5s
+ * scope-close bound, so teardown remains bounded end to end. */
+const SPILL_FLUSH_TIMEOUT_MS = 1_500;
+const ERROR_TEXT_MAX_LENGTH = 4_096;
 
-export const POWERSHELL_WRAPPER = String.raw`
-$utf8 = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = $utf8
-[Console]::InputEncoding = $utf8
-$OutputEncoding = $utf8
-$ErrorActionPreference = 'Stop'
-$global:LASTEXITCODE = $null
-try {
-  $command = [ScriptBlock]::Create($env:PI_BACKGROUND_TERMINAL_COMMAND)
-  & $command
-  $succeeded = $?
-  $nativeExit = $global:LASTEXITCODE
-  if (-not $succeeded) { exit 1 }
-  if ($null -ne $nativeExit -and [int]$nativeExit -ne 0) { exit [int]$nativeExit }
-  exit 0
-} catch {
-  [Console]::Error.WriteLine(($_ | Out-String).TrimEnd())
-  exit 1
+function bounded(text: string) {
+  return text.slice(0, ERROR_TEXT_MAX_LENGTH);
 }
-`.trim();
+
+function boundedError(error: unknown) {
+  return bounded(error instanceof Error ? error.message : String(error));
+}
+
+// --- Internal state -----------------------------------------------------------
+
+/** Mutable snapshot; exposed to readers via the readonly TerminalSnapshot type.
+ * stdout/stderr are getters over the live OutputBuffers. */
+interface MutableSnapshot extends TerminalSnapshot {
+  status: TerminalStatus;
+  pid?: number;
+  settledAt?: number;
+  exitCode?: number;
+  signal?: string;
+  errorText?: string;
+}
+
+interface Entry {
+  snapshot: MutableSnapshot;
+  child: ChildProcess;
+  scope: Scope.Closeable;
+  stdoutBuf: OutputBuffer;
+  stderrBuf: OutputBuffer;
+  spillStreams: fs.WriteStream[];
+  /** Set in the same synchronous effect that sends SIGTERM so a natural exit
+   * before signaling keeps its truthful status. */
+  killSignaled: boolean;
+  /** The child emitted 'error' (spawn failure etc.); settles as "failed".
+   * Kept separate from errorText, which also carries non-fatal notes
+   * (spill failures) that must not flip a clean exit to "failed". */
+  processErrored: boolean;
+  /** 'exit' event observed (code/signal recorded). */
+  exited: boolean;
+  /** 'close' event observed (stdio flushed; the settle trigger). */
+  stdioClosed: boolean;
+  /** A settle-after-spill-flush is in flight; don't start a second one. */
+  settling: boolean;
+  /** The shell exited without stdio closing; a bounded scope close is queued
+   * to reap descendants that still hold the inherited pipes open. */
+  exitCleanupStarted: boolean;
+  /** Completed exactly once when the entry settles. Kill callers and the scope
+   * finalizer can all await the same result without missing a notification. */
+  settled: Deferred.Deferred<void>;
+}
+
+export interface StartOptions {
+  readonly command: string;
+  readonly title: string;
+  readonly cwd: string;
+}
+
+export interface KillResult {
+  readonly id: string;
+  readonly title: string;
+  readonly status: TerminalStatus;
+  /** True when the entry was still running when this kill began. */
+  readonly wasRunning: boolean;
+  /** True when this call initiated the termination AND the entry settled as
+   * killed (a natural exit that won the race reports killed: false). */
+  readonly killed: boolean;
+  /** Final exit rendering ("exit 0", "SIGTERM", ...) captured at settle time,
+   * so reports stay accurate even if the entry is pruned afterwards. */
+  readonly exit: string;
+}
+
+// --- Read model ----------------------------------------------------------------
+
+/** Synchronous bridge for the TUI. Snapshots are live objects; do not mutate. */
+export interface TerminalReadModel {
+  list(): ReadonlyArray<TerminalSnapshot>;
+  get(id: string): TerminalSnapshot | undefined;
+  size(): number;
+  /** Any-change notification (widget, /ps list). */
+  subscribe(listener: () => void): () => void;
+  /** Per-terminal notification (/ps detail view). */
+  subscribeTo(id: string, listener: () => void): () => void;
+  /** Fire-and-forget kill (dashboard/detail `x`). Not marked consumed: the
+   * settle still flows back to the model as a follow-up message. */
+  requestKill(id: string): void;
+  /**
+   * Register the settle hook. `consumed` is true when an active bg_kill is
+   * collecting the result (so it must not also be delivered as a follow-up).
+   */
+  setOnSettled(
+    hook: ((snap: TerminalSnapshot, consumed: boolean) => void) | undefined,
+  ): void;
+}
+
+// --- Service --------------------------------------------------------------------
+
+export interface TerminalManagerShape {
+  start(
+    options: StartOptions,
+  ): Effect.Effect<TerminalSnapshot, SpawnError | ConcurrencyLimitError>;
+  status(id: string): Effect.Effect<TerminalSnapshot, UnknownTerminalError>;
+  /** Kill running terminals; resolves only after they have settled. */
+  kill(ids: ReadonlyArray<string>): Effect.Effect<ReadonlyArray<KillResult>>;
+  readonly list: Effect.Effect<ReadonlyArray<TerminalSnapshot>>;
+  readonly disposeAll: Effect.Effect<void>;
+  readonly view: TerminalReadModel;
+}
+
+export class TerminalManager extends Context.Service<
+  TerminalManager,
+  TerminalManagerShape
+>()("background-terminals/TerminalManager") {}
+
+// --- Process helpers ------------------------------------------------------------
 
 function existingFile(candidate: string | undefined): string | undefined {
   if (!candidate) return undefined;
@@ -82,715 +206,771 @@ export function resolvePowerShell7(
   );
 }
 
-export function resolveTaskkill(env: NodeJS.ProcessEnv = process.env): string {
-  const root = env.SystemRoot ?? env.WINDIR;
-  if (!root)
-    throw new Error("SystemRoot is not set; cannot resolve taskkill.exe.");
-  const candidate = path.join(root, "System32", "taskkill.exe");
-  const found = existingFile(candidate);
-  if (!found) throw new Error(`taskkill.exe was not found at ${candidate}.`);
-  return found;
+let cachedPwshPath: string | undefined;
+
+/**
+ * Wrapper invoked as `pwsh -Command <wrapper>`: the real command arrives via
+ * the PI_BACKGROUND_TERMINAL_COMMAND env var, so arbitrary command text never
+ * goes through pwsh native-argument quoting. UTF-8 console I/O is forced and
+ * the native exit code is propagated explicitly (a trailing native call does
+ * not reliably set pwsh's own exit code).
+ */
+export const POWERSHELL_WRAPPER = String.raw`
+$utf8 = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8
+[Console]::InputEncoding = $utf8
+$OutputEncoding = $utf8
+$ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = $null
+try {
+  $command = [ScriptBlock]::Create($env:PI_BACKGROUND_TERMINAL_COMMAND)
+  & $command
+  $succeeded = $?
+  $nativeExit = $global:LASTEXITCODE
+  if (-not $succeeded) { exit 1 }
+  if ($null -ne $nativeExit -and [int]$nativeExit -ne 0) { exit [int]$nativeExit }
+  exit 0
+} catch {
+  [Console]::Error.WriteLine(($_ | Out-String).TrimEnd())
+  exit 1
 }
+`.trim();
 
-export type TaskkillClassification =
-  "terminated" | "not-found" | "failed" | "timed-out";
-
-export interface TaskkillResult {
-  readonly force: boolean;
-  readonly classification: TaskkillClassification;
-  readonly code?: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-export interface StartOptions {
-  readonly command: string;
-  readonly title: string;
-  readonly cwd: string;
-}
-
-export interface KillResult {
-  readonly id: string;
-  readonly title: string;
-  readonly status: TerminalStatus;
-  readonly wasRunning: boolean;
-  readonly killed: boolean;
-  readonly exit: string;
-  readonly helpers: readonly TaskkillResult[];
-}
-
-export interface TerminalReadModel {
-  list(): ReadonlyArray<TerminalSnapshot>;
-  get(id: string): TerminalSnapshot | undefined;
-  size(): number;
-  subscribe(listener: () => void): () => void;
-  subscribeTo(id: string, listener: () => void): () => void;
-  requestKill(id: string): void;
-  setOnSettled(
-    hook: ((snapshot: TerminalSnapshot, consumed: boolean) => void) | undefined,
-  ): void;
-}
-
-export interface ManagerOptions {
-  readonly pwshPath?: string;
-  readonly taskkillPath?: string;
-  readonly retainedBytes?: number;
-  readonly spillSegmentBytes?: number;
-  readonly spillMaxFiles?: number;
-  readonly spillHighWaterMark?: number;
-  readonly spillRoot?: string;
-  readonly gracefulWaitMs?: number;
-  readonly forcedWaitMs?: number;
-  readonly helperTimeoutMs?: number;
-  readonly inheritedPipeGraceMs?: number;
-  readonly flushTimeoutMs?: number;
-  readonly disposalTimeoutMs?: number;
-}
-
-interface MutableSnapshot extends TerminalSnapshot {
-  status: TerminalStatus;
-  settledAt?: number;
-  exitCode?: number;
-  signal?: string;
-  errorText?: string;
-}
-
-interface Entry {
-  snapshot: MutableSnapshot;
-  child: ChildProcess;
-  stdout: OutputCapture;
-  stderr: OutputCapture;
-  exited: boolean;
-  closed: boolean;
-  processError?: string;
-  killDelivered: boolean;
-  killTask?: Promise<readonly TaskkillResult[]>;
-  settleTask?: Promise<void>;
-  settled: Promise<void>;
-  resolveSettled: () => void;
-  closeObserved: Promise<void>;
-  resolveCloseObserved: () => void;
-}
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-function appendError(current: string | undefined, next: string): string {
-  const combined = current ? `${current}; ${next}` : next;
-  return combined.slice(0, 4096);
-}
-
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function within<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-): Promise<T | undefined> {
-  return Promise.race([promise, wait(timeoutMs).then(() => undefined)]);
-}
-
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted)
-    return Promise.reject(
-      new Error("Kill wait aborted; termination continues in the background."),
-    );
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () =>
-      reject(
-        new Error(
-          "Kill wait aborted; termination continues in the background.",
-        ),
-      );
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
-  });
-}
-
-function helperOutput(text: string): string {
-  return text.slice(-4096);
-}
-
-function classifyTaskkill(
-  code: number | null,
-  stdout: string,
-  stderr: string,
-): TaskkillClassification {
-  if (code === 0) return "terminated";
-  const combined = `${stdout}\n${stderr}`;
-  if (/not found|no running instance|cannot find|not running/i.test(combined))
-    return "not-found";
-  return "failed";
-}
-
-export class BackgroundTerminalManager {
-  private readonly options: Required<
-    Omit<ManagerOptions, "pwshPath" | "taskkillPath" | "spillRoot">
-  > & {
-    pwshPath: string;
-    taskkillPath: string;
-    spillRoot: string;
-  };
-  private readonly entries = new Map<string, Entry>();
-  private readonly listeners = new Set<() => void>();
-  private readonly idListeners = new Map<string, Set<() => void>>();
-  private readonly killInterest = new Map<string, number>();
-  private counter = 0;
-  private reserved = 0;
-  private disposed = false;
-  private spillDirectory?: string;
-  private onSettled?: (snapshot: TerminalSnapshot, consumed: boolean) => void;
-
-  readonly view: TerminalReadModel;
-
-  constructor(options: ManagerOptions = {}) {
-    if (process.platform !== "win32") {
-      throw new Error(
-        "background-terminals supports native Windows PowerShell 7 only.",
-      );
-    }
-    this.options = {
-      pwshPath: options.pwshPath ?? resolvePowerShell7(),
-      taskkillPath: options.taskkillPath ?? resolveTaskkill(),
-      retainedBytes: options.retainedBytes ?? RETAINED_PER_STREAM,
-      spillSegmentBytes: options.spillSegmentBytes ?? SPILL_SEGMENT_BYTES,
-      spillMaxFiles: options.spillMaxFiles ?? SPILL_MAX_FILES,
-      spillHighWaterMark: options.spillHighWaterMark ?? 64 * 1024,
-      spillRoot:
-        options.spillRoot ?? path.join(os.tmpdir(), "pi-background-terminals"),
-      gracefulWaitMs: options.gracefulWaitMs ?? 750,
-      forcedWaitMs: options.forcedWaitMs ?? 750,
-      helperTimeoutMs: options.helperTimeoutMs ?? 1_500,
-      inheritedPipeGraceMs: options.inheritedPipeGraceMs ?? 1_000,
-      flushTimeoutMs: options.flushTimeoutMs ?? 1_500,
-      disposalTimeoutMs: options.disposalTimeoutMs ?? 5_000,
-    };
-
-    this.view = {
-      list: () => [...this.entries.values()].map((entry) => entry.snapshot),
-      get: (id) => this.entries.get(id)?.snapshot,
-      size: () => this.entries.size,
-      subscribe: (listener) => {
-        this.listeners.add(listener);
-        return () => this.listeners.delete(listener);
-      },
-      subscribeTo: (id, listener) => {
-        const set = this.idListeners.get(id) ?? new Set<() => void>();
-        set.add(listener);
-        this.idListeners.set(id, set);
-        return () => {
-          set.delete(listener);
-          if (set.size === 0) this.idListeners.delete(id);
-        };
-      },
-      requestKill: (id) => {
-        const entry = this.entries.get(id);
-        if (entry) void this.terminate(entry);
-      },
-      setOnSettled: (hook) => {
-        this.onSettled = hook;
-      },
+function shellInvocation(command: string) {
+  if (process.platform === "win32") {
+    cachedPwshPath ??= resolvePowerShell7();
+    return {
+      shell: cachedPwshPath,
+      args: [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        POWERSHELL_WRAPPER,
+      ],
     };
   }
+  return { shell: "/bin/sh", args: ["-c", command] };
+}
 
-  private notify(id?: string): void {
-    for (const listener of [...this.listeners]) {
+/** Signal the whole process group on POSIX so descendants (servers a shell
+ * command spawned) die with it; a wedged child must not orphan its tree. */
+function killTree(child: ChildProcess, signal: NodeJS.Signals) {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      const killer = spawn(
+        "taskkill",
+        [
+          "/pid",
+          String(child.pid),
+          "/T",
+          // Always /F on Windows: the soft taskkill stage only reaches GUI
+          // apps (console children have no message loop for WM_CLOSE), and a
+          // tree kill anchored at an already-exited shell pid is a no-op —
+          // either way grandchildren would leak holding the pipes open.
+          "/F",
+        ],
+        { stdio: "ignore", windowsHide: true },
+      );
+      killer.once("error", () => {
+        try {
+          child.kill(signal);
+        } catch {
+          // Process may already be gone.
+        }
+      });
+      killer.once("exit", (code) => {
+        if (code === 0) return;
+        try {
+          child.kill(signal);
+        } catch {
+          // Process may already be gone.
+        }
+      });
+      killer.unref();
+      return;
+    } catch {
+      // Fall through to the direct signal when taskkill cannot be launched.
+    }
+  }
+  if (process.platform !== "win32" && child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Group may already be gone; fall through to the direct signal.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Process may already be gone.
+  }
+}
+
+/** Await stdio closure without retaining a listener after interruption. */
+function awaitChildClose(child: ChildProcess, closed: () => boolean) {
+  return Effect.callback<void>((resume) => {
+    if (closed()) {
+      resume(Effect.void);
+      return;
+    }
+    const onClose = () => resume(Effect.void);
+    child.once("close", onClose);
+    return Effect.sync(() => child.off("close", onClose));
+  });
+}
+
+/** SIGTERM → deadline → SIGKILL; waits for stdio closure rather than only the
+ * shell's exit because descendants can keep the inherited pipes and process
+ * group alive after the shell itself is gone. */
+function terminateChild(
+  child: ChildProcess,
+  closed: () => boolean,
+  onSignal: () => void,
+) {
+  return Effect.suspend(() => {
+    if (closed()) return Effect.void;
+    return Effect.gen(function* () {
+      yield* Effect.sync(() => {
+        onSignal();
+        killTree(child, "SIGTERM");
+      });
+      yield* awaitChildClose(child, closed).pipe(
+        Effect.timeout(FORCE_KILL_AFTER_MS),
+        Effect.ignore,
+      );
+      if (closed()) return;
+      yield* Effect.sync(() => killTree(child, "SIGKILL"));
+      yield* awaitChildClose(child, closed).pipe(
+        Effect.timeout(500),
+        Effect.ignore,
+      );
+    });
+  });
+}
+
+// --- Implementation --------------------------------------------------------------
+
+const makeManager = Effect.gen(function* () {
+  // Scoped detached forker for sync contexts (read-model kills, process-event
+  // settlement, pruning). Completed fibers remove themselves; manager scope
+  // close interrupts any work that outlives the bounded disposeAll wait.
+  const cleanupFibers = yield* FiberSet.make();
+  const runCleanup = yield* FiberSet.runtime(cleanupFibers)();
+
+  const entries = new Map<string, Entry>();
+  /** Small immutable tombstones preserve truthful kill reports if pruning
+   * races the tool boundary after an id was validated. */
+  const settledHistory = new Map<
+    string,
+    Pick<KillResult, "title" | "status" | "exit">
+  >();
+  /** ids with an in-flight kill() collecting the result (settle → consumed). */
+  const killInterest = new Map<string, number>();
+  const listeners = new Set<() => void>();
+  const idListeners = new Map<string, Set<() => void>>();
+  let counter = 0;
+  let reserved = 0;
+  let disposed = false;
+  let spillDir: string | undefined | null;
+  let onSettled:
+    ((snap: TerminalSnapshot, consumed: boolean) => void) | undefined;
+
+  const notify = (id?: string) => {
+    for (const listener of [...listeners]) {
       try {
         listener();
       } catch {
-        /* UI listeners are isolated. */
+        // A failed widget/render listener must not corrupt lifecycle state.
       }
     }
     if (id) {
-      for (const listener of [...(this.idListeners.get(id) ?? [])]) {
+      for (const listener of idListeners.get(id) ?? []) {
         try {
           listener();
         } catch {
-          /* UI listeners are isolated. */
+          // Same.
         }
       }
     }
-  }
+  };
 
-  private directory(): string {
-    if (this.spillDirectory) return this.spillDirectory;
-    fs.mkdirSync(this.options.spillRoot, { recursive: true, mode: 0o700 });
-    this.spillDirectory = fs.mkdtempSync(
-      path.join(this.options.spillRoot, "session-"),
-    );
-    return this.spillDirectory;
-  }
+  const runningCount = () =>
+    [...entries.values()].filter((e) => e.snapshot.status === "running").length;
 
-  private runningCount(): number {
-    return [...this.entries.values()].filter(
-      (entry) => entry.snapshot.status === "running",
-    ).length;
-  }
-
-  start(options: StartOptions): TerminalSnapshot {
-    if (this.disposed)
-      throw new Error("Background terminal manager is shutting down.");
-    if (this.runningCount() + this.reserved >= MAX_RUNNING) {
-      throw new Error(
-        `Max ${MAX_RUNNING} background terminals can run concurrently.`,
-      );
+  const addKillInterest = (ids: ReadonlyArray<string>) => {
+    for (const id of ids) killInterest.set(id, (killInterest.get(id) ?? 0) + 1);
+  };
+  const releaseKillInterest = (ids: ReadonlyArray<string>) => {
+    for (const id of ids) {
+      const count = (killInterest.get(id) ?? 1) - 1;
+      if (count <= 0) killInterest.delete(id);
+      else killInterest.set(id, count);
     }
-    this.reserved++;
-    try {
-      const id = `bt-${++this.counter}`;
-      // All filesystem/capture resources are allocated before spawning. Only
-      // stream attachment remains post-spawn, and that window has synchronous
-      // process-tree cleanup on every failure.
-      const spillDirectory = this.directory();
-      const stdoutSpill = new RotatingSpill({
-        directory: spillDirectory,
-        stem: `${id}.stdout`,
-        segmentBytes: this.options.spillSegmentBytes,
-        maxFiles: this.options.spillMaxFiles,
-        highWaterMark: this.options.spillHighWaterMark,
-      });
-      const stderrSpill = new RotatingSpill({
-        directory: spillDirectory,
-        stem: `${id}.stderr`,
-        segmentBytes: this.options.spillSegmentBytes,
-        maxFiles: this.options.spillMaxFiles,
-        highWaterMark: this.options.spillHighWaterMark,
-      });
-      const stdoutBuffer = new OutputBuffer(this.options.retainedBytes);
-      const stderrBuffer = new OutputBuffer(this.options.retainedBytes);
-      const settled = deferred();
-      const closeObserved = deferred();
-      const childOptions: SpawnOptions = {
-        cwd: options.cwd,
-        env: {
-          ...process.env,
-          PI_BACKGROUND_TERMINAL_COMMAND: options.command,
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-        windowsHide: true,
-        shell: false,
-      };
-      const child = spawn(
-        this.options.pwshPath,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          POWERSHELL_WRAPPER,
-        ],
-        childOptions,
-      );
-      let entry!: Entry;
-      let stdoutCapture: OutputCapture;
-      let stderrCapture: OutputCapture;
-      try {
-        if (!child.stdout || !child.stderr) {
-          throw new Error("PowerShell capture pipes were not created");
-        }
-        stdoutCapture = new OutputCapture(
-          child.stdout,
-          stdoutBuffer,
-          stdoutSpill,
-          () => this.notify(id),
-        );
-        stderrCapture = new OutputCapture(
-          child.stderr,
-          stderrBuffer,
-          stderrSpill,
-          () => this.notify(id),
-        );
-      } catch (error) {
-        try {
-          if (child.pid) {
-            const killed = spawnSync(
-              this.options.taskkillPath,
-              ["/PID", String(child.pid), "/T", "/F"],
-              { stdio: "ignore", windowsHide: true, shell: false },
-            );
-            if (killed.status !== 0) child.kill();
-          } else {
-            child.kill();
-          }
-        } catch {
-          try {
-            child.kill();
-          } catch {
-            // The setup error remains authoritative.
-          }
-        }
-        stdoutSpill.removeFiles();
-        stderrSpill.removeFiles();
-        throw error;
-      }
-      const snapshot: MutableSnapshot = {
-        id,
-        command: options.command,
-        title: options.title,
-        cwd: options.cwd,
-        pid: child.pid,
-        status: "running",
-        createdAt: Date.now(),
-        get stdout() {
-          return stdoutCapture.view();
-        },
-        get stderr() {
-          return stderrCapture.view();
-        },
-      };
-      entry = {
-        snapshot,
-        child,
-        stdout: stdoutCapture,
-        stderr: stderrCapture,
-        exited: false,
-        closed: false,
-        killDelivered: false,
-        settled: settled.promise,
-        resolveSettled: settled.resolve,
-        closeObserved: closeObserved.promise,
-        resolveCloseObserved: closeObserved.resolve,
-      };
-      this.entries.set(id, entry);
+  };
 
-      child.once("error", (error) => {
-        entry.processError =
-          error instanceof Error ? error.message : String(error);
-        entry.exited = true;
-      });
-      child.once("exit", (code, signal) => {
-        entry.exited = true;
-        if (!entry.processError) {
-          snapshot.exitCode = code ?? undefined;
-          snapshot.signal = signal ?? undefined;
-        }
-        setTimeout(() => {
-          if (snapshot.status === "running" && !entry.closed)
-            void this.cleanupInheritedPipes(entry);
-        }, this.options.inheritedPipeGraceMs).unref?.();
-      });
-      child.once("close", (code, signal) => {
-        entry.closed = true;
-        entry.resolveCloseObserved();
-        if (!entry.processError) {
-          snapshot.exitCode ??= code ?? undefined;
-          snapshot.signal ??= signal ?? undefined;
-        }
-        void this.settle(entry);
-      });
-      this.notify(id);
-      return snapshot;
-    } finally {
-      this.reserved--;
-    }
-  }
+  const closeEntryScope = (entry: Entry) =>
+    Scope.close(entry.scope, Exit.void).pipe(Effect.ignore);
 
-  private async cleanupInheritedPipes(entry: Entry): Promise<void> {
-    // The root already exited naturally. taskkill may still find its process
-    // object/tree; never convert this natural exit into "killed".
-    const helpers = await this.runTaskkill(entry.snapshot.pid, true);
-    if (helpers.classification !== "terminated") {
-      entry.snapshot.errorText = appendError(
-        entry.snapshot.errorText,
-        "Inherited stdio remained open after the PowerShell process exited; descendant cleanup could not be confirmed",
-      );
-    }
-    await within(entry.closeObserved, this.options.forcedWaitMs);
-    if (!entry.closed) {
-      entry.stdout.forceClose();
-      entry.stderr.forceClose();
-      entry.closed = true;
-      entry.resolveCloseObserved();
-      entry.snapshot.errorText = appendError(
-        entry.snapshot.errorText,
-        "stdio was closed after a bounded cleanup deadline; output may be incomplete",
-      );
-      await this.settle(entry);
-    }
-  }
-
-  private async settle(entry: Entry): Promise<void> {
-    if (entry.snapshot.status !== "running") return;
-    if (entry.settleTask) return entry.settleTask;
-    entry.settleTask = (async () => {
-      await Promise.all([
-        entry.stdout.flush(this.options.flushTimeoutMs),
-        entry.stderr.flush(this.options.flushTimeoutMs),
-      ]);
-      const stdout = entry.stdout.view();
-      const stderr = entry.stderr.view();
-      for (const view of [stdout, stderr]) {
-        if (view.spillError)
-          entry.snapshot.errorText = appendError(
-            entry.snapshot.errorText,
-            `spill: ${view.spillError}`,
-          );
-      }
-      const snapshot = entry.snapshot;
-      snapshot.settledAt = Date.now();
-      snapshot.status = entry.killDelivered
-        ? "killed"
-        : entry.processError || snapshot.exitCode !== 0
-          ? "failed"
-          : "done";
-      if (entry.processError)
-        snapshot.errorText = appendError(
-          snapshot.errorText,
-          entry.processError,
-        );
-      const consumed = (this.killInterest.get(snapshot.id) ?? 0) > 0;
-      entry.resolveSettled();
-      this.notify(snapshot.id);
-      if (!this.disposed) {
-        try {
-          this.onSettled?.(snapshot, consumed);
-        } catch {
-          /* Session may be closing. */
-        }
-      }
-      this.prune();
-    })();
-    return entry.settleTask;
-  }
-
-  private prune(): void {
-    if (this.entries.size <= MAX_TRACKED) return;
-    const settled = [...this.entries.values()]
+  const pruneSettled = () => {
+    if (entries.size <= MAX_TRACKED) return;
+    const candidates = [...entries.values()]
       .filter(
-        (entry) =>
-          entry.snapshot.status !== "running" &&
-          !this.killInterest.has(entry.snapshot.id),
+        (e) =>
+          e.snapshot.status !== "running" && !killInterest.has(e.snapshot.id),
       )
       .sort(
-        (a, b) => (a.snapshot.settledAt ?? 0) - (b.snapshot.settledAt ?? 0),
+        (a, b) =>
+          (a.snapshot.settledAt ?? a.snapshot.createdAt) -
+          (b.snapshot.settledAt ?? b.snapshot.createdAt),
       );
-    while (this.entries.size > MAX_TRACKED && settled.length > 0) {
-      const entry = settled.shift()!;
-      this.entries.delete(entry.snapshot.id);
-      entry.stdout.removeSpillFiles();
-      entry.stderr.removeSpillFiles();
+    for (const entry of candidates) {
+      if (entries.size <= MAX_TRACKED) break;
+      entries.delete(entry.snapshot.id);
+      runCleanup(closeEntryScope(entry));
     }
-  }
+  };
 
-  private runTaskkill(
-    pid: number | undefined,
-    force: boolean,
-  ): Promise<TaskkillResult> {
-    if (!pid)
-      return Promise.resolve({
-        force,
-        classification: "not-found",
-        stdout: "",
-        stderr: "missing pid",
-      });
-    return new Promise((resolve) => {
-      let stdout = "";
-      let stderr = "";
-      let finished = false;
-      let timer: ReturnType<typeof setTimeout>;
-      const helper = spawn(
-        this.options.taskkillPath,
-        ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])],
-        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, shell: false },
-      );
-      helper.stdout?.setEncoding("utf8");
-      helper.stderr?.setEncoding("utf8");
-      helper.stdout?.on("data", (chunk: string) => {
-        stdout = helperOutput(stdout + chunk);
-      });
-      helper.stderr?.on("data", (chunk: string) => {
-        stderr = helperOutput(stderr + chunk);
-      });
-      const done = (result: TaskkillResult) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timer);
-        resolve(result);
-      };
-      helper.once("error", (error) =>
-        done({
-          force,
-          classification: "failed",
-          stdout,
-          stderr: helperOutput(
-            `${stderr}\n${error instanceof Error ? error.message : String(error)}`,
-          ),
+  /** End all spill streams; resolves when their buffers are flushed to disk
+   * (bounded), so a settle notification never points at a partial file. */
+  const flushSpillStreams = (entry: Entry) => {
+    const streams = entry.spillStreams;
+    entry.spillStreams = [];
+    return Effect.forEach(
+      streams,
+      (stream) =>
+        Effect.callback<void>((resume) => {
+          const done = () => resume(Effect.void);
+          try {
+            stream.end(done);
+          } catch {
+            // Best effort; tmpdir contents are disposable.
+            done();
+          }
         }),
-      );
-      helper.once("close", (code) =>
-        done({
-          force,
-          classification: classifyTaskkill(code, stdout, stderr),
-          code: code ?? undefined,
-          stdout,
-          stderr,
-        }),
-      );
-      timer = setTimeout(() => {
-        try {
-          helper.kill();
-        } catch {
-          /* helper deadline is authoritative */
-        }
-        done({ force, classification: "timed-out", stdout, stderr });
-      }, this.options.helperTimeoutMs);
-    });
-  }
-
-  private terminate(entry: Entry): Promise<readonly TaskkillResult[]> {
-    if (entry.killTask) return entry.killTask;
-    if (entry.snapshot.status !== "running") return Promise.resolve([]);
-    entry.killTask = (async () => {
-      const helpers: TaskkillResult[] = [];
-      const naturallyExitedBeforeSoft = entry.exited;
-      const soft = await this.runTaskkill(entry.snapshot.pid, false);
-      helpers.push(soft);
-      if (soft.classification === "terminated" && !naturallyExitedBeforeSoft)
-        entry.killDelivered = true;
-      await within(entry.settled, this.options.gracefulWaitMs);
-      if (entry.snapshot.status === "running") {
-        const naturallyExitedBeforeForce = entry.exited;
-        const forced = await this.runTaskkill(entry.snapshot.pid, true);
-        helpers.push(forced);
-        if (
-          forced.classification === "terminated" &&
-          !naturallyExitedBeforeForce
-        )
-          entry.killDelivered = true;
-        await within(entry.settled, this.options.forcedWaitMs);
-      }
-      if (entry.snapshot.status === "running") {
-        try {
-          entry.child.kill();
-        } catch {
-          /* taskkill result remains the truth source */
-        }
-        entry.stdout.forceClose();
-        entry.stderr.forceClose();
-        entry.closed = true;
-        entry.resolveCloseObserved();
-        entry.snapshot.errorText = appendError(
-          entry.snapshot.errorText,
-          "Process-tree termination reached its bounded deadline; descendant death could not be confirmed",
-        );
-        await this.settle(entry);
-      }
-      return helpers;
-    })();
-    return entry.killTask;
-  }
-
-  status(id: string): TerminalSnapshot {
-    const snapshot = this.entries.get(id)?.snapshot;
-    if (!snapshot)
-      throw new Error(
-        `Unknown terminal id "${id}". Known: ${[...this.entries.keys()].join(", ") || "none"}.`,
-      );
-    return snapshot;
-  }
-
-  list(): ReadonlyArray<TerminalSnapshot> {
-    return this.view.list();
-  }
-
-  async kill(
-    ids: readonly string[],
-    signal?: AbortSignal,
-  ): Promise<ReadonlyArray<KillResult>> {
-    const unique = [...new Set(ids)];
-    const entries = unique.map((id) => {
-      const entry = this.entries.get(id);
-      if (!entry)
-        throw new Error(
-          `Unknown terminal id "${id}". Known: ${[...this.entries.keys()].join(", ") || "none"}.`,
-        );
-      return entry;
-    });
-    const running = entries.filter(
-      (entry) => entry.snapshot.status === "running",
+      { concurrency: "unbounded", discard: true },
+    ).pipe(
+      Effect.timeoutOrElse({
+        duration: SPILL_FLUSH_TIMEOUT_MS,
+        orElse: () =>
+          Effect.sync(() => {
+            entry.stdoutBuf.spillPath = undefined;
+            entry.stderrBuf.spillPath = undefined;
+            entry.snapshot.errorText ??=
+              "Full-log spill flush timed out; full output may be incomplete";
+          }),
+      }),
     );
-    for (const entry of running)
-      this.killInterest.set(
-        entry.snapshot.id,
-        (this.killInterest.get(entry.snapshot.id) ?? 0) + 1,
-      );
-    const tasks = new Map(
-      running.map((entry) => [entry.snapshot.id, this.terminate(entry)]),
-    );
+  };
+
+  /** Single settle path — idempotent; kill vs natural exit vs error races are
+   * resolved by whichever lands first (the second call is a no-op). */
+  const settle = (entry: Entry) => {
+    const s = entry.snapshot;
+    if (s.status !== "running") return;
+    s.settledAt = Date.now();
+    s.status = entry.killSignaled
+      ? "killed"
+      : entry.processErrored
+        ? "failed"
+        : s.exitCode === 0
+          ? "done"
+          : "failed";
+    settledHistory.set(s.id, {
+      title: s.title,
+      status: s.status,
+      exit: formatExit(s),
+    });
+    while (settledHistory.size > MAX_SETTLED_HISTORY) {
+      const oldest = settledHistory.keys().next().value;
+      if (oldest === undefined) break;
+      settledHistory.delete(oldest);
+    }
+    // Completing the Deferred can immediately resume kill waiters, whose
+    // ensuring blocks release interest. Snapshot consumption first so the
+    // settle hook observes the interest that existed when settlement won.
+    const consumed = (killInterest.get(s.id) ?? 0) > 0;
+    Deferred.doneUnsafe(entry.settled, Effect.void);
+    notify(s.id);
     try {
-      const reports = await abortable(
-        Promise.all(
-          [...tasks.entries()].map(
-            async ([id, task]) => [id, await task] as const,
+      // During teardown, don't queue results into a shutting-down session.
+      if (!disposed) onSettled?.(s, consumed);
+    } catch {
+      // The parent session may be unavailable; settlement stays final.
+    }
+    pruneSettled();
+  };
+
+  /** Flush the spill files, then settle: the completion follow-up (and the
+   * kill() resolution) reference the spill path, so the full capture must be
+   * on disk before anyone is told about it. Idempotent via `settling`. */
+  const settleAfterFlush = (entry: Entry) => {
+    if (entry.settling || entry.snapshot.status !== "running") return;
+    entry.settling = true;
+    runCleanup(
+      flushSpillStreams(entry).pipe(
+        Effect.andThen(Effect.sync(() => settle(entry))),
+      ),
+    );
+  };
+
+  const scheduleExitCleanup = (entry: Entry) => {
+    if (entry.exitCleanupStarted) return;
+    entry.exitCleanupStarted = true;
+    runCleanup(
+      Effect.sleep(SETTLE_GRACE_MS).pipe(
+        Effect.andThen(
+          Effect.suspend(() =>
+            entry.snapshot.status === "running" && !entry.stdioClosed
+              ? closeEntryScope(entry).pipe(
+                  Effect.timeout(STOP_TIMEOUT_MS),
+                  Effect.ignore,
+                )
+              : Effect.void,
           ),
         ),
-        signal,
-      );
-      const reportById = new Map(reports);
-      return entries.map((entry): KillResult => {
-        const wasRunning = tasks.has(entry.snapshot.id);
-        return {
-          id: entry.snapshot.id,
-          title: entry.snapshot.title,
-          status: entry.snapshot.status,
-          wasRunning,
-          killed: wasRunning && entry.snapshot.status === "killed",
-          exit: formatExit(entry.snapshot),
-          helpers: reportById.get(entry.snapshot.id) ?? [],
-        };
-      });
-    } finally {
-      for (const entry of running) {
-        const count = (this.killInterest.get(entry.snapshot.id) ?? 1) - 1;
-        if (count <= 0) this.killInterest.delete(entry.snapshot.id);
-        else this.killInterest.set(entry.snapshot.id, count);
-      }
-      this.prune();
-    }
-  }
-
-  async disposeAll(): Promise<void> {
-    if (this.disposed) return;
-    this.disposed = true;
-    const running = [...this.entries.values()].filter(
-      (entry) => entry.snapshot.status === "running",
+      ),
     );
-    const teardown = Promise.all(running.map((entry) => this.terminate(entry)));
-    await within(teardown, this.options.disposalTimeoutMs);
-    for (const entry of running) {
-      if (entry.snapshot.status === "running") {
-        entry.stdout.forceClose();
-        entry.stderr.forceClose();
-        entry.closed = true;
-        entry.resolveCloseObserved();
-        await this.settle(entry);
-      }
+  };
+
+  const resolveSpillDir = () => {
+    if (spillDir !== undefined) return spillDir ?? undefined;
+    try {
+      const base = path.join(os.tmpdir(), "pi-background-terminals");
+      fs.mkdirSync(base, { recursive: true, mode: 0o700 });
+      fs.chmodSync(base, 0o700);
+      spillDir = fs.mkdtempSync(path.join(base, "session-"));
+      fs.chmodSync(spillDir, 0o700);
+    } catch {
+      spillDir = null;
     }
-    this.entries.clear();
-    if (this.spillDirectory) {
-      try {
-        fs.rmSync(this.spillDirectory, { recursive: true, force: true });
-      } catch {
-        /* temp retention is best effort */
-      }
-      this.spillDirectory = undefined;
+    return spillDir ?? undefined;
+  };
+
+  const makeSpill = (
+    entry: () => Entry | undefined,
+    id: string,
+    stream: "stdout" | "stderr",
+  ) => {
+    const dir = resolveSpillDir();
+    if (!dir) return undefined;
+    const spillPath = path.join(dir, `${id}.${stream}.log`);
+    try {
+      const file = fs.createWriteStream(spillPath, {
+        flags: "a",
+        mode: 0o600,
+      });
+      let broken = false;
+      file.on("error", (error) => {
+        broken = true;
+        const current = entry();
+        if (current) {
+          const buf =
+            stream === "stdout" ? current.stdoutBuf : current.stderrBuf;
+          buf.spillPath = undefined;
+          current.snapshot.errorText ??= bounded(
+            `Full-log spill to ${spillPath} failed: ${boundedError(error)}`,
+          );
+        }
+      });
+      return {
+        spillPath,
+        file,
+        write: (chunk: string) => {
+          // writableEnded guard: late 'data' after the settle flush must not
+          // error the ended stream (and falsely report the spill as broken).
+          if (!broken && !file.writableEnded) file.write(chunk);
+        },
+      };
+    } catch {
+      return undefined;
     }
-    this.notify();
-  }
-}
+  };
+
+  const start = (options: StartOptions) =>
+    Effect.gen(function* () {
+      // Reserve synchronously (before the first yield inside doStart) so
+      // parallel tool calls cannot race past the cap.
+      yield* Effect.suspend(
+        (): Effect.Effect<void, SpawnError | ConcurrencyLimitError> => {
+          if (disposed) {
+            return new SpawnError({
+              message: "Background terminal manager is shutting down.",
+            });
+          }
+          if (runningCount() + reserved >= MAX_RUNNING) {
+            return new ConcurrencyLimitError({
+              message: `Max ${MAX_RUNNING} background terminals can run concurrently. Stop one with bg_kill before starting another.`,
+            });
+          }
+          reserved++;
+          return Effect.void;
+        },
+      );
+
+      const doStart = Effect.gen(function* () {
+        const { shell, args } = shellInvocation(options.command);
+        const child = yield* Effect.try({
+          try: () =>
+            spawn(shell, args, {
+              cwd: options.cwd,
+              env: {
+                ...process.env,
+                ...(process.platform === "win32"
+                  ? { PI_BACKGROUND_TERMINAL_COMMAND: options.command }
+                  : undefined),
+              },
+              // stdin IGNORED: there is no input surface, ever. A process
+              // that reads stdin sees EOF immediately.
+              stdio: ["ignore", "pipe", "pipe"],
+              windowsHide: true,
+              // Own process group on POSIX → group kill takes the whole tree.
+              detached: process.platform !== "win32",
+            }),
+          catch: (error) => new SpawnError({ message: boundedError(error) }),
+        });
+
+        const id = `bt-${++counter}`;
+        const entryRef = () => entries.get(id);
+        const stdoutSpill = makeSpill(entryRef, id, "stdout");
+        const stderrSpill = makeSpill(entryRef, id, "stderr");
+        const stdoutBuf = new OutputBuffer(
+          RETAINED_PER_STREAM,
+          stdoutSpill?.write,
+        );
+        const stderrBuf = new OutputBuffer(
+          RETAINED_PER_STREAM,
+          stderrSpill?.write,
+        );
+        stdoutBuf.spillPath = stdoutSpill?.spillPath;
+        stderrBuf.spillPath = stderrSpill?.spillPath;
+
+        const snapshot: MutableSnapshot = {
+          id,
+          command: options.command,
+          title: options.title,
+          cwd: options.cwd,
+          pid: child.pid,
+          status: "running",
+          createdAt: Date.now(),
+          get stdout() {
+            return stdoutBuf.view();
+          },
+          get stderr() {
+            return stderrBuf.view();
+          },
+        };
+
+        const scope = yield* Scope.make();
+        const settled = yield* Deferred.make<void>();
+        const entry: Entry = {
+          snapshot,
+          child,
+          scope,
+          stdoutBuf,
+          stderrBuf,
+          spillStreams: [stdoutSpill?.file, stderrSpill?.file].filter(
+            (file): file is fs.WriteStream => file !== undefined,
+          ),
+          killSignaled: false,
+          processErrored: false,
+          exited: false,
+          stdioClosed: false,
+          settling: false,
+          exitCleanupStarted: false,
+          settled,
+        };
+
+        // Plain-callback stream plumbing (the codex-backend precedent):
+        // setEncoding's internal StringDecoder is multibyte-safe across
+        // chunk boundaries.
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdoutBuf.push(chunk);
+          notify(id);
+        });
+        child.stderr?.setEncoding("utf8");
+        child.stderr?.on("data", (chunk: string) => {
+          stderrBuf.push(chunk);
+          notify(id);
+        });
+        // Spawn failures (ENOENT etc.) arrive via 'error', not a throw. Node
+        // still emits 'close' afterwards (with a bogus errno as code), so
+        // record the failure here and let the close path do the one settle.
+        child.once("error", (error) => {
+          entry.processErrored = true;
+          snapshot.errorText ??= boundedError(error);
+          entry.exited = true;
+          settleAfterFlush(entry);
+        });
+        // Record code/signal on 'exit'; settle on 'close' so the completion
+        // notification always carries the final flushed output.
+        child.once("exit", (code, signal) => {
+          entry.exited = true;
+          snapshot.exitCode = code ?? undefined;
+          // ??= preserves a signal pre-recorded by the kill path (Windows
+          // has no signal delivery; an external taskkill reports exit 1).
+          snapshot.signal ??= signal ?? undefined;
+          // A descendant can keep the pipes open after the shell exits. Give
+          // close a short natural grace, then close the scope to terminate
+          // the surviving process group and force a bounded settlement.
+          scheduleExitCleanup(entry);
+        });
+        child.once("close", (code, signal) => {
+          entry.exited = true;
+          entry.stdioClosed = true;
+          // Only trust close's code/signal when 'exit' never fired (a spawn
+          // 'error' close reports the errno, e.g. -2, as its code).
+          if (!entry.processErrored) {
+            snapshot.exitCode ??= code ?? undefined;
+            snapshot.signal ??= signal ?? undefined;
+          }
+          settleAfterFlush(entry);
+        });
+
+        // One teardown path: kill(), requestKill, pruning, disposeAll, and
+        // runtime.dispose() all converge on closing this scope.
+        yield* Scope.provide(
+          Effect.addFinalizer(() =>
+            Effect.gen(function* () {
+              // Only claim "killed" when we are actually about to signal a
+              // live process; a natural exit that already happened (still
+              // waiting on 'close') keeps its truthful done/failed status.
+              yield* terminateChild(
+                child,
+                () => entry.stdioClosed,
+                () => {
+                  entry.killSignaled ||=
+                    !entry.exited && entry.snapshot.status === "running";
+                  // Windows kills go through taskkill (no signal delivery),
+                  // so record the requested signal for the killed settle to
+                  // report SIGTERM like POSIX instead of "exit 1".
+                  if (entry.killSignaled && process.platform === "win32") {
+                    entry.snapshot.signal ??= "SIGTERM";
+                  }
+                },
+              );
+              // Give the natural close→flush→settle path a bounded grace,
+              // then force the settle: a grandchild holding the pipe open
+              // (detached into a new group) must not leave the entry
+              // "running" forever.
+              if (entry.snapshot.status === "running") {
+                yield* Deferred.await(entry.settled).pipe(
+                  Effect.timeout(SETTLE_GRACE_MS),
+                  Effect.ignore,
+                );
+              }
+              if (entry.snapshot.status === "running" && !entry.settling) {
+                // Force the settle ourselves. When `settling` is set, the
+                // close path's flush→settle is already in flight (bounded by
+                // SPILL_FLUSH_TIMEOUT_MS) — settling here first would cite a
+                // spill file that is still being flushed.
+                if (!entry.stdioClosed) {
+                  entry.snapshot.errorText ??=
+                    "stdio did not close after termination; output may be incomplete";
+                }
+                entry.settling = true;
+                yield* flushSpillStreams(entry);
+                settle(entry);
+              }
+            }),
+          ),
+          scope,
+        );
+
+        // disposeAll may have swept the entries map while we were setting up;
+        // an entry added after the sweep would never be torn down. Close our
+        // own scope (kills the child) and fail instead (subagents precedent).
+        if (disposed) {
+          yield* closeEntryScope(entry);
+          return yield* new SpawnError({
+            message: "Background terminal manager shut down while starting.",
+          });
+        }
+        entries.set(id, entry);
+        notify(id);
+        return snapshot as TerminalSnapshot;
+      });
+
+      // Uninterruptible: between spawn() and entries.set there must be no
+      // window where an interrupt (tool abort, runtime dispose) leaves a
+      // live child that no scope/registry knows about. All steps are sync.
+      return yield* doStart.pipe(
+        Effect.uninterruptible,
+        Effect.ensuring(
+          Effect.sync(() => {
+            reserved--;
+            notify();
+          }),
+        ),
+      );
+    });
+
+  const status = (id: string) =>
+    Effect.suspend(
+      (): Effect.Effect<TerminalSnapshot, UnknownTerminalError> => {
+        const entry = entries.get(id);
+        if (!entry) {
+          const known = [...entries.keys()];
+          return new UnknownTerminalError({
+            message: `Unknown terminal id "${id}". Known: ${known.join(", ") || "none"}.`,
+          });
+        }
+        return Effect.succeed(entry.snapshot as TerminalSnapshot);
+      },
+    );
+
+  /** Kill one running entry: close the scope — whose finalizer marks the kill
+   * at the signal point, terminates the tree, and force-settles —
+   * in a DETACHED fiber. Once the flag is set the termination must actually
+   * happen; a tool abort interrupting the caller cannot cancel it (this is
+   * what makes "termination continues in the background" truthful). */
+  const killEntry = (entry: Entry) =>
+    Effect.sync(() => {
+      if (entry.snapshot.status !== "running") return;
+      runCleanup(
+        closeEntryScope(entry).pipe(
+          Effect.timeout(STOP_TIMEOUT_MS),
+          Effect.ignore,
+        ),
+      );
+    });
+
+  const kill = (ids: ReadonlyArray<string>) =>
+    Effect.suspend(() => {
+      const unique = [...new Set(ids)];
+      const byId = new Map(
+        unique
+          .map((id) => entries.get(id))
+          .filter((entry): entry is Entry => entry !== undefined)
+          .map((entry) => [entry.snapshot.id, entry]),
+      );
+      const running = [...byId.values()].filter(
+        (entry) => entry.snapshot.status === "running",
+      );
+      const runningIds = running.map((entry) => entry.snapshot.id);
+      // Mark consumed before signaling so this kill's settlements are not
+      // ALSO queued as automatic follow-up messages to the model.
+      addKillInterest(runningIds);
+      const work = Effect.gen(function* () {
+        yield* Effect.forEach(running, killEntry, {
+          concurrency: "unbounded",
+        });
+        // Every caller waits on the entries that were running when its kill
+        // began. Deferred completion cannot be missed and supports concurrent
+        // overlapping/multi-id kill calls.
+        yield* Effect.forEach(
+          running,
+          (entry) => Deferred.await(entry.settled),
+          { concurrency: "unbounded", discard: true },
+        );
+        // Capture the report BEFORE the ensuring below releases interest and
+        // prunes — a just-settled entry must not vanish out from under it.
+        return unique.map((id): KillResult => {
+          const snapshot = byId.get(id)?.snapshot;
+          const history = settledHistory.get(id);
+          const status = snapshot?.status ?? history?.status ?? "killed";
+          const wasRunning = runningIds.includes(id);
+          return {
+            id,
+            title: snapshot?.title ?? history?.title ?? "?",
+            status,
+            wasRunning,
+            // A natural exit can win the race with our SIGTERM; report what
+            // actually happened rather than claiming the kill did it.
+            killed: wasRunning && status === "killed",
+            exit: snapshot
+              ? formatExit(snapshot)
+              : (history?.exit ?? "unknown"),
+          };
+        });
+      });
+      return work.pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            releaseKillInterest(runningIds);
+            pruneSettled();
+          }),
+        ),
+      );
+    });
+
+  const disposeAll = Effect.gen(function* () {
+    disposed = true;
+    const all = [...entries.values()];
+    entries.clear();
+    yield* Effect.forEach(
+      all,
+      (entry) =>
+        closeEntryScope(entry).pipe(
+          Effect.timeout(STOP_TIMEOUT_MS),
+          Effect.ignore,
+        ),
+      { concurrency: "unbounded" },
+    );
+    // Detached kill/prune/flush work is scoped to the manager. Wait for it
+    // within the shutdown bound; the FiberSet finalizer interrupts anything
+    // still live when the manager scope closes, so cleanup cannot leak.
+    yield* FiberSet.awaitEmpty(cleanupFibers).pipe(
+      Effect.timeout(STOP_TIMEOUT_MS),
+      Effect.ignore,
+    );
+    yield* Effect.sync(() => {
+      const dir = spillDir;
+      spillDir = null;
+      if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    });
+    yield* Effect.sync(() => notify());
+  });
+
+  const view: TerminalReadModel = {
+    list: () => [...entries.values()].map((entry) => entry.snapshot),
+    get: (id) => entries.get(id)?.snapshot,
+    size: () => entries.size,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    subscribeTo: (id, listener) => {
+      let set = idListeners.get(id);
+      if (!set) {
+        set = new Set();
+        idListeners.set(id, set);
+      }
+      set.add(listener);
+      return () => {
+        set.delete(listener);
+        if (set.size === 0) idListeners.delete(id);
+      };
+    },
+    requestKill: (id) => {
+      const entry = entries.get(id);
+      if (!entry) return;
+      // UI-initiated kills are not "consumed": the killed result still flows
+      // back to the model as a follow-up message (subagents precedent).
+      runCleanup(killEntry(entry).pipe(Effect.ignore));
+    },
+    setOnSettled: (hook) => {
+      onSettled = hook;
+    },
+  };
+
+  // Safety net: disposing the ManagedRuntime tears everything down even if
+  // the extension forgot to call disposeAll explicitly.
+  yield* Effect.addFinalizer(() => disposeAll);
+
+  return TerminalManager.of({
+    start,
+    status,
+    kill,
+    list: Effect.sync(() => [...entries.values()].map((e) => e.snapshot)),
+    disposeAll,
+    view,
+  });
+});
+
+export const TerminalManagerLive: Layer.Layer<TerminalManager> = Layer.effect(
+  TerminalManager,
+  makeManager,
+);

@@ -1,71 +1,87 @@
-export type TerminalStatus = "running" | "done" | "failed" | "killed";
+/**
+ * Domain model for background terminals.
+ *
+ * A "terminal" is one long-running shell process started by the model. It
+ * receives no stdin (launched with stdin: "ignore"), captures stdout and
+ * stderr separately, and settles exactly once into a final state.
+ */
 
+import { Data } from "effect";
+
+export type TerminalStatus = "running" | "done" | "failed" | "killed";
+// "done"   = exited with code 0
+// "failed" = exited non-zero, or a spawn-level runtime error after start
+// "killed" = terminated by bg_kill, the /ps UI, or session teardown
+
+/** Read-only view over one captured output stream (stdout or stderr). */
 export interface OutputView {
-  /** Raw decoded tail. Sanitization belongs at display boundaries. */
+  /** Decoded, possibly head-trimmed text (bounded by the in-memory cap). */
   readonly text: string;
+  /** True total bytes ever received on this stream. */
   readonly totalBytes: number;
+  /** Bytes dropped from the head of the in-memory view (0 = complete). */
   readonly truncatedBytes: number;
-  readonly spillDirectory?: string;
-  readonly spillFiles: readonly string[];
-  readonly spillRetainedBytes: number;
-  readonly spillDroppedBytes: number;
-  readonly spillRotations: number;
-  readonly spillComplete: boolean;
-  readonly spillError?: string;
+  /** On-disk full capture; always the complete stream when spilling works. */
+  readonly spillPath?: string;
 }
 
 export interface TerminalSnapshot {
   readonly id: string;
+  /** Exactly the command line the model asked to run. */
   readonly command: string;
+  /** Short model-provided name, shown in listings and the UI. */
   readonly title: string;
+  /** Resolved absolute cwd the process runs in. */
   readonly cwd: string;
+  /** Undefined only if spawn itself failed before a pid was assigned. */
   readonly pid?: number;
   readonly status: TerminalStatus;
+  /** Date.now() at spawn. */
   readonly createdAt: number;
+  /** Date.now() at settle (exit/kill). */
   readonly settledAt?: number;
+  /** Set when the process exited via exit code (exactly one of exitCode/signal). */
   readonly exitCode?: number;
+  /** Set when the process was terminated by a signal, e.g. "SIGTERM". */
   readonly signal?: string;
+  /** Spawn error / kill-escalation notes, bounded. */
   readonly errorText?: string;
   readonly stdout: OutputView;
   readonly stderr: OutputView;
 }
 
-export interface TerminalSummary {
-  readonly id: string;
-  readonly title: string;
-  readonly status: TerminalStatus;
-  readonly elapsed: string;
+export function formatElapsed(snap: TerminalSnapshot) {
+  const end = snap.settledAt ?? Date.now();
+  const totalSeconds = Math.max(0, Math.round((end - snap.createdAt) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0
+    ? `${minutes}m${seconds.toString().padStart(2, "0")}s`
+    : `${seconds}s`;
 }
 
-export function formatElapsed(
-  snapshot: Pick<TerminalSnapshot, "createdAt" | "settledAt">,
-): string {
-  const seconds = Math.max(
-    0,
-    Math.round(
-      ((snapshot.settledAt ?? Date.now()) - snapshot.createdAt) / 1000,
-    ),
-  );
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const rest = seconds % 60;
-  if (hours > 0) return `${hours}h${minutes.toString().padStart(2, "0")}m`;
-  if (minutes > 0) return `${minutes}m${rest.toString().padStart(2, "0")}s`;
-  return `${rest}s`;
+/** "exit 0", "exit 137", "SIGTERM", or "running". */
+export function formatExit(snap: TerminalSnapshot) {
+  if (snap.status === "running") return "running";
+  if (snap.signal) return snap.signal;
+  if (snap.exitCode !== undefined) return `exit ${snap.exitCode}`;
+  return snap.status;
 }
 
-export function formatExit(snapshot: TerminalSnapshot): string {
-  if (snapshot.status === "running") return "running";
-  if (snapshot.signal) return snapshot.signal;
-  if (snapshot.exitCode !== undefined) return `exit ${snapshot.exitCode}`;
-  return snapshot.status;
-}
+// --- Errors -------------------------------------------------------------------
 
-export function terminalSummary(snapshot: TerminalSnapshot): TerminalSummary {
-  return {
-    id: snapshot.id,
-    title: snapshot.title,
-    status: snapshot.status,
-    elapsed: formatElapsed(snapshot),
-  };
-}
+export class SpawnError extends Data.TaggedError("SpawnError")<{
+  readonly message: string;
+}> {}
+
+export class ConcurrencyLimitError extends Data.TaggedError(
+  "ConcurrencyLimitError",
+)<{
+  readonly message: string;
+}> {}
+
+export class UnknownTerminalError extends Data.TaggedError(
+  "UnknownTerminalError",
+)<{
+  readonly message: string;
+}> {}

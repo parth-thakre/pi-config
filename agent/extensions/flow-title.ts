@@ -190,7 +190,12 @@ function frame(lines: string[], width: number, heading: string): string[] {
     return `${bar} ${truncateToWidth(line, width - 4, "")}${" ".repeat(pad)} ${bar}`;
   });
 
-  return [top, ...framed, bottom];
+  // TUI can briefly request extremely narrow widths during layout. The frame
+  // decorations themselves have a minimum natural width, so bound every final
+  // line rather than relying on the individual content budgets above.
+  return [top, ...framed, bottom].map((line) =>
+    truncateToWidth(line, Math.max(0, width), ""),
+  );
 }
 
 export function renderHeader(width: number, ctx: ExtensionContext): string[] {

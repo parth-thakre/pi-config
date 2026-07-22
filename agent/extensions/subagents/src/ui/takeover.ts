@@ -54,6 +54,50 @@ function statusWord(snap: SubagentSnapshot, theme: Theme): string {
   }
 }
 
+function composeSubagentPanel(
+  theme: Theme,
+  title: string,
+  rows: readonly string[],
+  width: number,
+  height: number,
+  focused = false,
+): string[] {
+  const panelWidth = Math.max(0, width);
+  const panelHeight = Math.max(0, height);
+  if (panelHeight === 0) return [];
+  if (panelWidth === 0) return Array.from({ length: panelHeight }, () => "");
+
+  const border = (text: string) =>
+    theme.fg(focused ? "borderAccent" : "borderMuted", text);
+  if (panelWidth === 1) {
+    return Array.from({ length: panelHeight }, (_, index) =>
+      border(index === 0 ? "╭" : index === panelHeight - 1 ? "╰" : "│"),
+    );
+  }
+
+  const innerWidth = panelWidth - 2;
+  const safeTitle = displayLine(title);
+  const rawTitle = truncateToWidth(safeTitle, Math.max(0, innerWidth - 3), "");
+  const titleText = rawTitle
+    ? ` ${theme.bold(theme.fg(focused ? "accent" : "text", rawTitle))} `
+    : "";
+  const topFill = Math.max(0, innerWidth - 1 - visibleWidth(titleText));
+  const lines = [border("╭─") + titleText + border(`${"─".repeat(topFill)}╮`)];
+
+  const bodyHeight = Math.max(0, panelHeight - 2);
+  for (let index = 0; index < bodyHeight; index++) {
+    const row = truncateToWidth(rows[index] ?? "", innerWidth, "…");
+    lines.push(
+      border("│") +
+        row +
+        " ".repeat(Math.max(0, innerWidth - visibleWidth(row))) +
+        border("│"),
+    );
+  }
+  if (panelHeight > 1) lines.push(border(`╰${"─".repeat(innerWidth)}╯`));
+  return lines.slice(0, panelHeight);
+}
+
 // --- Entry point ---------------------------------------------------------------
 
 export async function openSubagentPicker(
@@ -173,24 +217,6 @@ class SubagentDashboard implements Component {
     }
   }
 
-  private pad(text: string, width: number): string {
-    const truncated = truncateToWidth(text, width);
-    return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
-  }
-
-  private borderSegment(width: number, title: string): string {
-    const theme = this.theme;
-    const label = title
-      ? ` ${truncateToWidth(title, Math.max(0, width - 3))} `
-      : "";
-    const labelWidth = visibleWidth(label);
-    return (
-      theme.fg("border", "─") +
-      (label ? theme.fg("text", label) : "") +
-      theme.fg("border", "─".repeat(Math.max(0, width - 1 - labelWidth)))
-    );
-  }
-
   render(width: number): string[] {
     const theme = this.theme;
     this.clampSelection();
@@ -201,7 +227,7 @@ class SubagentDashboard implements Component {
     // chat, editor, and extra footer lines while leaving pi's final footer
     // row visible.
     const bodyHeight = Math.max(6, rows - 5);
-    const innerWidth = width - 2;
+    const innerWidth = Math.max(0, width - 2);
 
     const lines: string[] = [];
 
@@ -222,26 +248,17 @@ class SubagentDashboard implements Component {
       ),
     );
 
-    // Top border with panel title
     const settled = subs.filter((s) => s.status !== "running").length;
-    lines.push(
-      theme.fg("border", "╭") +
-        this.borderSegment(innerWidth, `agents · ${settled}/${subs.length}`) +
-        theme.fg("border", "╮"),
-    );
-
-    // Rows
-    const divider = theme.fg("border", "│");
     const rowLines = this.renderRows(subs, innerWidth, bodyHeight);
-    for (let i = 0; i < bodyHeight; i++) {
-      lines.push(divider + this.pad(rowLines[i] ?? "", innerWidth) + divider);
-    }
-
-    // Bottom border
     lines.push(
-      theme.fg("border", "╰") +
-        theme.fg("border", "─".repeat(innerWidth)) +
-        theme.fg("border", "╯"),
+      ...composeSubagentPanel(
+        theme,
+        `Agents · ${settled}/${subs.length}`,
+        rowLines,
+        width,
+        bodyHeight + 2,
+        true,
+      ),
     );
 
     // Hints
@@ -456,37 +473,34 @@ class TakeoverView implements Component, Focusable {
 
   render(width: number): string[] {
     const theme = this.theme;
-    const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
     const lines: string[] = [];
     const snap = this.snap();
 
     if (!snap) {
-      lines.push(border);
-      lines.push(theme.fg("dim", `${this.id} is no longer tracked`));
-      lines.push(border);
-      return lines;
+      return composeSubagentPanel(
+        theme,
+        "Subagent",
+        [theme.fg("dim", `${displayLine(this.id)} is no longer tracked`)],
+        width,
+        3,
+        true,
+      );
     }
 
-    lines.push(border);
+    const innerWidth = Math.max(0, width - 2);
     const utilization = formatContextUtilization(snap.usage);
-    const header =
-      `${statusGlyph(snap, theme)} ` +
-      theme.fg(
-        "accent",
-        theme.bold(`${displayLine(snap.id)} · ${displayLine(snap.title)}`),
-      ) +
-      theme.fg("muted", ` · ${snap.status} · ${formatElapsed(snap)}`) +
+    const metadata =
+      ` ${statusGlyph(snap, theme)} ` +
+      theme.fg("muted", `${snap.status} · ${formatElapsed(snap)}`) +
       theme.fg(
         "dim",
         ` · ${displayLine(snap.backend)}: ${displayLine(snap.meta.modelLabel ?? "?")}`,
       ) +
       (utilization ? theme.fg("dim", ` · ${utilization}`) : "");
-    lines.push(truncateToWidth(header, width));
-    lines.push(border);
 
-    // Fixed-height transcript viewport. Error and scroll status consume rows
-    // inside the viewport so streaming/scrolling never changes overlay height.
-    const transcript = buildTranscriptLines(snap, width, theme);
+    // Error and scroll status consume rows inside the fixed transcript panel,
+    // keeping the overlay stable while the subagent streams.
+    const transcript = buildTranscriptLines(snap, innerWidth, theme);
     const viewport = this.viewportHeight();
     const errorRows = snap.errorText ? 1 : 0;
     const scrollRows = this.scrollOffset > 0 ? 1 : 0;
@@ -498,8 +512,8 @@ class TakeoverView implements Component, Focusable {
     if (snap.errorText) {
       body.push(
         truncateToWidth(
-          theme.fg("error", `error: ${displayLine(snap.errorText)}`),
-          width,
+          theme.fg("error", ` error: ${displayLine(snap.errorText)}`),
+          innerWidth,
         ),
       );
     }
@@ -510,32 +524,49 @@ class TakeoverView implements Component, Focusable {
     );
     const end = transcript.length - this.scrollOffset;
     const visible = transcript.slice(Math.max(0, end - capacity), end);
-    if (visible.length === 0) body.push(theme.fg("dim", "(no output yet)"));
+    if (visible.length === 0) body.push(theme.fg("dim", " (no output yet)"));
     else body.push(...visible);
 
     if (this.scrollOffset > 0) {
       body.push(
         truncateToWidth(
-          theme.fg("dim", `... ${this.scrollOffset} lines below · ↓/pgdn`),
-          width,
+          theme.fg("dim", ` ... ${this.scrollOffset} lines below · ↓/pgdn`),
+          innerWidth,
         ),
       );
     }
     while (body.length < viewport) body.push("");
-    lines.push(...body.slice(0, viewport));
+    lines.push(
+      ...composeSubagentPanel(
+        theme,
+        `${displayLine(snap.id)} · ${displayLine(snap.title)}`,
+        [metadata, ...body.slice(0, viewport)],
+        width,
+        viewport + 3,
+        true,
+      ),
+    );
 
-    lines.push(border);
-    lines.push(...this.input.render(width));
+    const inputLines = this.input.render(innerWidth);
+    lines.push(
+      ...composeSubagentPanel(
+        theme,
+        snap.status === "running" ? "Message subagent" : "Continue subagent",
+        inputLines,
+        width,
+        inputLines.length + 2,
+        true,
+      ),
+    );
     lines.push(
       truncateToWidth(
         theme.fg(
           "dim",
-          `${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort run · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
+          ` ${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
         ),
         width,
       ),
     );
-    lines.push(border);
     return lines;
   }
 

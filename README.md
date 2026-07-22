@@ -9,7 +9,8 @@ Personal, portable configuration for [Pi](https://github.com/earendil-works/pi-m
 - Compact custom footer with context usage, cost, and token speed
 - [`@wierdbytes/pi-facelift`](https://pi.dev/packages/@wierdbytes/pi-facelift) for built-in tool rendering and syntax-highlighted diffs
 - Closed, rounded Facelift-compatible frames for custom tools, including workflows, subagents, background terminals, file search, Firecrawl, Ask User, and Trope CUA
-- Facelift's `Working…` timer and duplicate TPS display are disabled in `agent/wierd-facelift/config.json`; TPS remains in the custom footer
+- Matching interactive workflow and subagent dashboards, with closed panels and accent-colored keyboard focus
+- Facelift's `Working…` timer and duplicate TPS display are disabled; TPS remains in the custom footer
 
 ## Restore
 
@@ -20,6 +21,15 @@ cp -R agent/. ~/.pi/agent/
 ```
 
 Start Pi once so packages declared in `agent/settings.json` are installed, then run `/reload` after changing extensions.
+
+For Facelift syntax highlighting and to suppress its duplicate working metrics, set these environment variables before starting Pi:
+
+```powershell
+[Environment]::SetEnvironmentVariable("FACELIFT_THEME", "catppuccin-mocha", "User")
+[Environment]::SetEnvironmentVariable("FACELIFT_SHOW_WORKING_TIME", "0", "User")
+```
+
+The Facelift config in `agent/wierd-facelift/config.json` also keeps its working timer disabled.
 
 ## Package updates
 

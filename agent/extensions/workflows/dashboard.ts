@@ -113,13 +113,15 @@ export function composeDashboardPanel(
   rows: readonly string[],
   width: number,
   height: number,
+  focused = false,
 ): string[] {
   const panelWidth = Math.max(0, width);
   const panelHeight = Math.max(0, height);
   if (panelHeight === 0) return [];
   if (panelWidth === 0) return Array.from({ length: panelHeight }, () => "");
 
-  const border = (text: string) => theme.fg("borderMuted", text);
+  const border = (text: string) =>
+    theme.fg(focused ? "borderAccent" : "borderMuted", text);
   if (panelWidth === 1) {
     return Array.from({ length: panelHeight }, (_, index) =>
       border(index === 0 ? "╭" : index === panelHeight - 1 ? "╰" : "│"),
@@ -129,11 +131,14 @@ export function composeDashboardPanel(
   const innerWidth = panelWidth - 2;
   const safeTitle = sanitizeTerminalText(title).replaceAll("\n", " ");
   const leadingDash = innerWidth > 0 ? "─" : "";
-  const titleText = truncateToWidth(
-    ` ${safeTitle} `,
-    Math.max(0, innerWidth - visibleWidth(leadingDash)),
+  const rawTitle = truncateToWidth(
+    safeTitle,
+    Math.max(0, innerWidth - visibleWidth(leadingDash) - 2),
     "",
   );
+  const titleText = rawTitle
+    ? ` ${theme.bold(theme.fg(focused ? "accent" : "text", rawTitle))} `
+    : "";
   const topFill = Math.max(
     0,
     innerWidth - visibleWidth(leadingDash) - visibleWidth(titleText),
@@ -979,8 +984,16 @@ export class WorkflowDashboard {
     rows: readonly string[],
     width: number,
     height: number,
+    focused = false,
   ): string[] {
-    return composeDashboardPanel(this.theme, title, rows, width, height);
+    return composeDashboardPanel(
+      this.theme,
+      title,
+      rows,
+      width,
+      height,
+      focused,
+    );
   }
 
   /** Scroll window keeping `selected` visible. */
@@ -1034,6 +1047,7 @@ export class WorkflowDashboard {
           [theme.fg("dim", " no workflow runs yet")],
           width,
           panelHeight,
+          true,
         ),
       );
       lines.push(
@@ -1069,7 +1083,7 @@ export class WorkflowDashboard {
       const left = ` ${marker} ${statusSquareFor(d, theme)} ${label} ${theme.fg("dim", runId)}`;
       return this.split(left, right, width - 2);
     });
-    lines.push(...this.panel("Runs", rows, width, panelHeight));
+    lines.push(...this.panel("Runs", rows, width, panelHeight, true));
     lines.push(
       this.hintLine(
         `${this.keys("tui.select.up")}/${this.keys("tui.select.down")} select · ${this.keys("tui.select.confirm")} open · ${this.keys("tui.select.cancel")} close`,
@@ -1238,12 +1252,14 @@ export class WorkflowDashboard {
       phaseRows,
       sidebarWidth,
       panelHeight,
+      this.detailFocus === "phases",
     );
     const rightPanel = this.panel(
       agentsTitle,
       agentRows,
       agentsWidth,
       panelHeight,
+      this.detailFocus === "agents",
     );
     for (let i = 0; i < panelHeight; i++) {
       lines.push(`${leftPanel[i] ?? ""} ${rightPanel[i] ?? ""}`);
@@ -1338,7 +1354,9 @@ export class WorkflowDashboard {
       rows.length > bodyHeight
         ? `Transcript · ${viewport.start + 1}-${viewport.end}/${rows.length}`
         : "Transcript";
-    lines.push(...this.panel(position, viewport.visible, width, panelHeight));
+    lines.push(
+      ...this.panel(position, viewport.visible, width, panelHeight, true),
+    );
     lines.push(
       this.hintLine(
         "j/k scroll · ctrl-u/d page · g/G top/bottom · h/left/esc back",

@@ -10,8 +10,6 @@
   "followUpMode": "one-at-a-time",
   "transport": "auto",
   "enableSkillCommands": false,
-  "skills": [
-    "!C:/Users/Parth Thakre/.agents/skills/**"
-  ],
+  "skills": ["!~/.agents/skills/**"],
   "quietStartup": true
 }

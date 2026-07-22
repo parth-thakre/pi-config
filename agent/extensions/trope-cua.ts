@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Container, Image, Text } from "@earendil-works/pi-tui";
@@ -287,13 +287,25 @@ function abortableDelay(ms: number, signal?: AbortSignal) {
 }
 
 export default function tropeCuaExtension(pi: ExtensionAPI) {
+  if (process.platform !== "win32" && process.platform !== "darwin") return;
+
   process.env.TROPE_CUA_JSON = "1";
-  const exe = join(
-    process.env.LOCALAPPDATA ?? "",
-    "Programs",
-    "TropeCUA",
-    "trope-cua.exe",
-  );
+  const configuredExecutable = process.env.TROPE_CUA_PATH?.trim();
+  const exe =
+    configuredExecutable ||
+    (process.platform === "win32" && process.env.LOCALAPPDATA
+      ? join(process.env.LOCALAPPDATA, "Programs", "TropeCUA", "trope-cua.exe")
+      : process.platform === "win32"
+        ? "trope-cua.exe"
+        : "trope-cua");
+  const platformName = process.platform === "darwin" ? "macOS" : "Windows";
+  const assertInstalled = () => {
+    if (isAbsolute(exe) && !existsSync(exe)) {
+      throw new Error(
+        `Trope CUA is not installed at ${exe}. Install it on ${platformName} or set TROPE_CUA_PATH.`,
+      );
+    }
+  };
   const ownerToken = Symbol("trope-cua-session");
   let sessionActive = false;
 
@@ -305,8 +317,7 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
 
   function startDaemon() {
     if (daemonState.started) return;
-    if (!existsSync(exe))
-      throw new Error(`Trope CUA is not installed at ${exe}`);
+    assertInstalled();
     const child = spawn(exe, ["serve", "--instance", daemonState.instance], {
       detached: true,
       stdio: "ignore",
@@ -393,12 +404,10 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "trope_cua",
     label: "Trope CUA",
-    description:
-      "Inspect and operate Windows apps through Trope CUA. Use vision screenshots by default. Supported operations include window/app discovery, screenshots, zoom, clicks, typing, keys, scrolling, element lookup, and app launch. Always use explicit pid/window_id, inspect action receipts, and verify mutations with a new screenshot.",
-    promptSnippet:
-      "Use Trope CUA for all visible Windows GUI inspection and interaction",
+    description: `Inspect and operate ${platformName} apps through Trope CUA. Use vision screenshots by default. Supported operations include window/app discovery, screenshots, zoom, clicks, typing, keys, scrolling, element lookup, and app launch. Always use explicit pid/window_id, inspect action receipts, and verify mutations with a new screenshot.`,
+    promptSnippet: `Use Trope CUA for visible ${platformName} GUI inspection and interaction`,
     promptGuidelines: [
-      "Use trope_cua instead of computer_* tools for Windows GUI work.",
+      `Use trope_cua instead of computer_* tools for ${platformName} GUI work.`,
       "Use trope_cua list_windows, select an explicit pid/window_id, then use get_window_state in vision mode.",
       "Use screenshot coordinates for trope_cua actions and verify every mutation with a fresh get_window_state screenshot.",
       "Never use trope_cua on Zen Private Browsing windows unless the user explicitly requests it.",
@@ -442,8 +451,7 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
     },
     parameters: schema,
     async execute(_toolCallId, params: TropeParams, signal) {
-      if (!existsSync(exe))
-        throw new Error(`Trope CUA is not installed at ${exe}`);
+      assertInstalled();
       validateTropeTarget(params);
       const args = params.args ?? {};
       if (WINDOW_TARGET_TOOLS.has(params.tool)) {
@@ -490,7 +498,7 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
     if (
       daemonState.owners.size > 0 ||
       !daemonState.started ||
-      !existsSync(exe)
+      (isAbsolute(exe) && !existsSync(exe))
     ) {
       return;
     }

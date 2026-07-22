@@ -25,6 +25,14 @@ const replacements = [
     'const trailing = Math.max(minTrailing, w - 1 - 2 - 1 - tw - 1 - 1);\n  const firstLine = `${border("╭──")} ${title} ${border(`${"─".repeat(trailing)}╮`)}`;',
   ],
   [
+    "const innerW = Math.max(1, w - contentCol + 1);",
+    "const innerW = Math.max(1, w - contentCol);",
+  ],
+  [
+    "return `${rail}${padBetween}${connector} ${fitted}`;",
+    'const fill = " ".repeat(Math.max(0, innerW - visibleWidth(fitted)));\n    return `${rail}${padBetween}${connector} ${fitted}${fill}${rail}`;',
+  ],
+  [
     'return border(`╰${"─".repeat(Math.max(1, w - 1))}`);',
     'return border(`╰${"─".repeat(Math.max(1, w - 2))}╯`);',
   ],

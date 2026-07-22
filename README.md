@@ -7,7 +7,7 @@ Personal, portable configuration for [Pi](https://github.com/earendil-works/pi-m
 - `trans-pride` theme and gradient startup title
 - Rounded, fully closed chat input
 - Compact custom footer with context usage, cost, and token speed
-- [`@wierdbytes/pi-facelift`](https://pi.dev/packages/@wierdbytes/pi-facelift) for built-in tool rendering and syntax-highlighted diffs
+- [`@wierdbytes/pi-facelift`](https://pi.dev/packages/@wierdbytes/pi-facelift) for built-in tool rendering and syntax-highlighted diffs, patched with fully enclosed frames that track terminal resizes
 - Closed, rounded Facelift-compatible frames for custom tools, including workflows, subagents, background terminals, file search, Firecrawl, Ask User, and Trope CUA
 - Matching interactive workflow and subagent dashboards, with closed panels and accent-colored keyboard focus
 - Facelift's `Working…` timer and duplicate TPS display are disabled; TPS remains in the custom footer
@@ -28,7 +28,7 @@ node ~/.pi/agent/scripts/configure-platform.mjs
 
 On Linux, this removes the Trope CUA extension entirely. On Windows and macOS it remains available, but the native `trope-cua` command must be installed separately. The extension also has a runtime platform guard, so it never registers on Linux even if the filter is skipped.
 
-Start Pi once so packages declared in `agent/settings.json` are installed. Then apply the portable closed-frame patch:
+Start Pi once so packages declared in `agent/settings.json` are installed. Then apply the portable Facelift compatibility patch. It fully encloses built-in tool frames, recomputes both edges on terminal resize, and collapses multiline Bash/Python heredocs until expanded:
 
 ```bash
 node ~/.pi/agent/scripts/patch-facelift.mjs
@@ -62,7 +62,7 @@ Update Pi and installed packages with:
 pi update --all
 ```
 
-Third-party package updates can replace local changes inside `~/.pi/agent/npm/`. Run `node ~/.pi/agent/scripts/patch-facelift.mjs` after updating.
+Third-party package updates can replace local changes inside `~/.pi/agent/npm/`. Run `node ~/.pi/agent/scripts/patch-facelift.mjs` after updating to restore resize-safe frames and compact multiline commands.
 
 ## Platform support
 

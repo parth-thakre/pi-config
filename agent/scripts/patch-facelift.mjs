@@ -14,8 +14,19 @@ const framePath = join(
   "tool-frame",
   "index.ts",
 );
+const faceliftPath = join(
+  agentDir,
+  "npm",
+  "node_modules",
+  "@wierdbytes",
+  "pi-facelift",
+  "index.ts",
+);
 
-const replacements = [
+// Close Facelift's frame chrome. The companion responsive component below
+// recomputes the final right edge from Component.render(width), so these full
+// frames remain valid when the terminal is resized.
+const frameReplacements = [
   [
     "const fixed = 1 + 2 + 1 + 1 + minTrailing;\n  const maxTitleW = Math.max(0, w - fixed);",
     "const fixed = 1 + 2 + 1 + 1 + minTrailing + 1;\n  const maxTitleW = Math.max(0, w - fixed);",
@@ -54,31 +65,62 @@ const replacements = [
   ],
 ];
 
-let source;
-try {
-  source = await readFile(framePath, "utf8");
-} catch {
-  console.error(
-    `Facelift is not installed at ${framePath}. Start Pi once, then run this script again.`,
-  );
-  process.exit(1);
-}
+const faceliftReplacements = [
+  [
+    'function termW(): number {',
+    'const ANSI_ESCAPE = /[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007)|(?:(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g;\n\nfunction resizeClosedFrame(source: string, requestedWidth: number): string[] | undefined {\n\tif (!source) return undefined;\n\tconst width = Math.max(2, Math.floor(requestedWidth));\n\tconst lines = source.split("\\n");\n\tconst resized: string[] = [];\n\n\tfor (const line of lines) {\n\t\tconst plain = line.replace(ANSI_ESCAPE, "");\n\t\tconst first = plain[0];\n\t\tconst corner = first === "╭" ? "╮" : first === "╰" ? "╯" : first === "│" ? "│" : undefined;\n\t\tif (!corner || plain.at(-1) !== corner) return undefined;\n\n\t\tconst oldWidth = visibleWidth(line);\n\t\tif (oldWidth === width) {\n\t\t\tresized.push(line);\n\t\t\tcontinue;\n\t\t}\n\n\t\tconst cornerIndex = line.lastIndexOf(corner);\n\t\tconst styleIndex = line.lastIndexOf("\\u001b[", cornerIndex);\n\t\tconst rightEdge = line.slice(styleIndex >= 0 ? styleIndex : cornerIndex);\n\t\tconst withoutRight = truncateToWidth(line, Math.max(0, oldWidth - 1), "");\n\t\tconst base = truncateToWidth(withoutRight, width - 1, "");\n\t\tconst fill = (first === "│" ? " " : "─").repeat(\n\t\t\tMath.max(0, width - 1 - visibleWidth(base)),\n\t\t);\n\t\tresized.push(`${base}${fill}${rightEdge}`);\n\t}\n\n\treturn resized;\n}\n\nfunction termW(): number {',
+    "function resizeClosedFrame(source: string, requestedWidth: number)",
+  ],
+  [
+    '\t\tconst cornerIndex = line.lastIndexOf(corner);\n\t\tconst styleIndex = line.lastIndexOf("\\u001b[", cornerIndex);\n\t\tconst rightEdge = line.slice(styleIndex >= 0 ? styleIndex : cornerIndex);',
+    '\t\tconst cornerIndex = line.lastIndexOf(corner);\n\t\tconst styleIndex = line.lastIndexOf("\\u001b[", cornerIndex);\n\t\tconst styleEnd = styleIndex >= 0 ? line.indexOf("m", styleIndex) + 1 : -1;\n\t\tconst openingStyle = styleEnd > styleIndex ? line.slice(styleIndex, styleEnd) : "";\n\t\tconst rightEdge = `${openingStyle}${corner}${line.slice(cornerIndex + 1)}`;',
+  ],
+  [
+    'if (!createReadTool || !TextComponent) return;\n\n\tconst cwd = process.cwd();',
+    'if (!createReadTool || !TextComponent) return;\n\n\t// Facelift normally bakes terminal width into Text before the component is\n\t// rendered. Preserve that source, then move the closed right edge to the\n\t// actual width supplied by pi-tui on every render (including after resize).\n\tconst BaseTextComponent = TextComponent as TextComponentCtor & { prototype: { render?: (width: number) => string[] } };\n\tTextComponent = class ResponsiveFrameText extends (BaseTextComponent as any) {\n\t\tprivate frameSource = "";\n\n\t\toverride setText(value: string): void {\n\t\t\tthis.frameSource = value;\n\t\t\tsuper.setText(value);\n\t\t}\n\n\t\toverride render(width: number): string[] {\n\t\t\tconst resized = resizeClosedFrame(this.frameSource, width);\n\t\t\tif (resized) return resized;\n\t\t\tconst render = BaseTextComponent.prototype.render;\n\t\t\treturn render ? render.call(this, width) : [truncateToWidth(this.frameSource, width, "")];\n\t\t}\n\t} as unknown as TextComponentCtor;\n\n\tconst cwd = process.cwd();',
+  ],
+  [
+    '// The full command is always rendered in the title — no length-based\n\t\t\t\t// truncation in compact mode. `frameTop` still right-truncates any\n\t\t\t\t// individual line that exceeds the frame width, which is a separate\n\t\t\t\t// (display-fit) concern from hiding command content.\n\t\t\t\tconst cmdLines = cmd.split("\\n");\n\t\t\t\tconst firstCmd = cmdLines[0];\n\t\t\t\tconst restCmd = cmdLines.slice(1).map((line) => line.replace(/^\\s+/, ""));',
+    '// Keep compact tool calls compact: heredocs (especially inline Python) can\n\t\t\t\t// contain hundreds of lines. Show their full source only when expanded.\n\t\t\t\t// `frameTop` still right-truncates individual lines to fit the display.\n\t\t\t\tconst cmdLines = cmd.split("\\n");\n\t\t\t\tconst firstCmd = cmdLines[0];\n\t\t\t\tconst allRestCmd = cmdLines.slice(1).map((line) => line.replace(/^\\s+/, ""));\n\t\t\t\tconst restCmd = ctx.expanded\n\t\t\t\t\t? allRestCmd\n\t\t\t\t\t: allRestCmd.length > 0\n\t\t\t\t\t\t? [theme.fg("muted", `… ${allRestCmd.length} more line${allRestCmd.length === 1 ? "" : "s"}`)]\n\t\t\t\t\t\t: [];',
+  ],
+  [
+    'const title = [firstTitle, ...restCmd.map((line) => theme.fg("accent", line))].join("\\n");',
+    'const title = [\n\t\t\t\t\tfirstTitle,\n\t\t\t\t\t...restCmd.map((line) => (ctx.expanded ? theme.fg("accent", line) : line)),\n\t\t\t\t].join("\\n");',
+  ],
+];
 
-let changed = false;
-for (const [openFrame, closedFrame] of replacements) {
-  if (source.includes(closedFrame)) continue;
-  if (!source.includes(openFrame)) {
+async function patchFile(path, replacements) {
+  let source;
+  try {
+    source = await readFile(path, "utf8");
+  } catch {
     throw new Error(
-      "The installed Facelift frame source has changed. Refusing to apply a partial patch; review the package update first.",
+      `Facelift is not installed at ${path}. Start Pi once, then run this script again.`,
     );
   }
-  source = source.replace(openFrame, closedFrame);
-  changed = true;
+
+  let changed = false;
+  for (const [original, patched, marker = patched] of replacements) {
+    if (source.includes(marker)) continue;
+    if (!source.includes(original)) {
+      throw new Error(
+        `The installed Facelift source has changed at ${path}; missing patch anchor: ${JSON.stringify(original.slice(0, 120))}`,
+      );
+    }
+    source = source.replace(original, patched);
+    changed = true;
+  }
+
+  if (changed) await writeFile(path, source, "utf8");
+  return changed;
 }
 
-if (changed) {
-  await writeFile(framePath, source, "utf8");
-  console.log("Patched Facelift with fully closed tool frames.");
-} else {
-  console.log("Facelift closed-frame patch is already applied.");
-}
+const changed =
+  (await patchFile(framePath, frameReplacements)) |
+  (await patchFile(faceliftPath, faceliftReplacements));
+
+console.log(
+  changed
+    ? "Patched Facelift with resize-safe frames and compact multiline commands."
+    : "Facelift resize and multiline-command patches are already applied.",
+);

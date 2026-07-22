@@ -60,6 +60,8 @@ function formatDirectory(cwd: string) {
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const HORIZONTAL_BORDER = /^─+(?: [↑↓] \d+ more ─*)?$/;
 const SELECTOR_FRAME_STATE = Symbol.for("pi-config.selector-frame-state");
+const RELOAD_SCREEN_TEXT =
+  "Reloading keybindings, extensions, skills, prompts, themes, and context files";
 const BOXED_SELECTORS = new Set([
   "TreeSelectorComponent",
   "ModelSelectorComponent",
@@ -119,25 +121,51 @@ function frameSelectorLines(lines: string[], width: number, theme: Theme) {
   ];
 }
 
+function isReloadScreen(container: Container, width: number) {
+  if (container.constructor !== Container || container.children.length !== 5) {
+    return false;
+  }
+
+  const childNames = container.children.map((child) => child.constructor.name);
+  if (
+    childNames.join(",") !== "DynamicBorder,Spacer,Text,Spacer,DynamicBorder"
+  ) {
+    return false;
+  }
+
+  return container.children[2]
+    .render(width)
+    .some((line) => line.replace(ANSI_ESCAPE, "").includes(RELOAD_SCREEN_TEXT));
+}
+
 function installSelectorFrames() {
   const prototype = Container.prototype as FramedContainerPrototype;
   if (!prototype[SELECTOR_FRAME_STATE]) {
-    const originalRender = prototype.render;
-    prototype[SELECTOR_FRAME_STATE] = { originalRender };
-    prototype.render = function renderBoxedSelector(width: number) {
-      const state = prototype[SELECTOR_FRAME_STATE];
-      if (!state?.theme || !BOXED_SELECTORS.has(this.constructor.name)) {
-        return originalRender.call(this, width);
-      }
-      const innerWidth = Math.max(1, width - 2);
-      return frameSelectorLines(
-        originalRender.call(this, innerWidth),
-        width,
-        state.theme,
-      );
+    prototype[SELECTOR_FRAME_STATE] = {
+      originalRender: prototype.render,
     };
   }
-  return prototype[SELECTOR_FRAME_STATE];
+
+  const state = prototype[SELECTOR_FRAME_STATE];
+  const originalRender = state.originalRender;
+  // Reassign on every extension reload so an existing shared prototype picks
+  // up the newest framing rules without stacking wrappers.
+  prototype.render = function renderBoxedSelector(width: number) {
+    if (!state.theme) return originalRender.call(this, width);
+
+    const isSelector = BOXED_SELECTORS.has(this.constructor.name);
+    if (!isSelector && !isReloadScreen(this, width)) {
+      return originalRender.call(this, width);
+    }
+
+    const innerWidth = Math.max(1, width - 2);
+    return frameSelectorLines(
+      originalRender.call(this, innerWidth),
+      width,
+      state.theme,
+    );
+  };
+  return state;
 }
 
 class BoxedEditor extends CustomEditor {

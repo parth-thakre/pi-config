@@ -1,9 +1,10 @@
 /**
- * ui-customization — custom footer + window title.
+ * ui-customization — boxed editor, custom footer, and window title.
  *
  * Adapted from davis7dotsh/my-pi-setup: his version also renders a gradient
  * ASCII header, but that is dropped here — flow-title.ts owns the header
  * (trans-pride gradient). This extension only owns:
+ *   - the editor: a complete box instead of standalone horizontal rules
  *   - the footer: directory + model on line 1, usage (context/cost/tok/s)
  *     + git summary on line 2, then extension statuses
  *   - the terminal window title ("pi · <dir>")
@@ -17,10 +18,11 @@
 
 import { homedir } from "node:os";
 import { relative } from "node:path";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ReadonlyFooterDataProvider,
+import {
+  CustomEditor,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
 import {
   getCapabilities,
@@ -51,6 +53,37 @@ function formatDirectory(cwd: string) {
     return `~/${relative(home, cwd)}`;
   }
   return cwd;
+}
+
+const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const HORIZONTAL_BORDER = /^─+(?: [↑↓] \d+ more ─*)?$/;
+
+class BoxedEditor extends CustomEditor {
+  render(width: number): string[] {
+    if (width < 3) return super.render(width);
+
+    const innerWidth = width - 2;
+    const lines = super.render(innerWidth);
+    const bottomBorder = lines.findIndex(
+      (line, index) =>
+        index > 0 && HORIZONTAL_BORDER.test(line.replace(ANSI_ESCAPE, "")),
+    );
+
+    return lines.map((line, index) => {
+      if (index === 0) {
+        return `${this.borderColor("╭")}${line}${this.borderColor("╮")}`;
+      }
+      if (index === bottomBorder) {
+        return `${this.borderColor("╰")}${line}${this.borderColor("╯")}`;
+      }
+      if (bottomBorder < 0 || index < bottomBorder) {
+        return `${this.borderColor("│")}${line}${this.borderColor("│")}`;
+      }
+
+      // Autocomplete remains visually attached below the input box.
+      return ` ${line} `;
+    });
+  }
 }
 
 function columns(left: string, right: string, width: number) {
@@ -152,6 +185,10 @@ export default function uiCustomization(pi: ExtensionAPI) {
       };
     });
 
+    ctx.ui.setEditorComponent(
+      (tui, theme, keybindings) =>
+        new BoxedEditor(tui, theme, keybindings, { paddingX: 1 }),
+    );
     ctx.ui.setTitle(`pi · ${title}`);
     pi.events.emit(REFRESH_CHANNEL, undefined);
   }
@@ -168,6 +205,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
     stopGitListener();
     requestRender = undefined;
     if (ctx.mode === "tui") {
+      ctx.ui.setEditorComponent(undefined);
       ctx.ui.setFooter(undefined);
     }
   });

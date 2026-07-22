@@ -115,13 +115,17 @@ const faceliftReplacements = [
     '\t\t\t\tconst maxShow = ctx.expanded ? lineCount : MAX_BASH_PREVIEW_LINES;',
   ],
   [
-    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = [...show];',
-    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("toolOutput", line),\n\t\t\t\t);',
     'theme.fg("toolOutput", line.replace(ANSI_ESCAPE, ""))',
+    'theme.fg("text", line.replace(ANSI_ESCAPE, ""))',
   ],
   [
-    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("toolOutput", line),\n\t\t\t\t);',
-    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\ttheme.fg("toolOutput", line.replace(ANSI_ESCAPE, "")),\n\t\t\t\t);',
+    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = [...show];',
+    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("text", line),\n\t\t\t\t);',
+    'theme.fg("text", line.replace(ANSI_ESCAPE, ""))',
+  ],
+  [
+    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("text", line),\n\t\t\t\t);',
+    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\ttheme.fg("text", line.replace(ANSI_ESCAPE, "")),\n\t\t\t\t);',
   ],
   [
     '// The full command is always rendered in the title — no length-based\n\t\t\t\t// truncation in compact mode. `frameTop` still right-truncates any\n\t\t\t\t// individual line that exceeds the frame width, which is a separate\n\t\t\t\t// (display-fit) concern from hiding command content.\n\t\t\t\tconst cmdLines = cmd.split("\\n");\n\t\t\t\tconst firstCmd = cmdLines[0];\n\t\t\t\tconst restCmd = cmdLines.slice(1).map((line) => line.replace(/^\\s+/, ""));',

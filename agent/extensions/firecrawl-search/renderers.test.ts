@@ -229,7 +229,7 @@ for (const item of cases) {
   }
 }
 
-test("long control-bearing identities stay inert, prefix-retaining, and one-line", () => {
+test("long control-bearing identities stay inert and bounded in closed frames", () => {
   for (const item of cases) {
     const tool = getTool(item.operation);
     const identity = `identifying-prefix-${item.operation}-\u001b]0;hidden-title\u0007\u001b[31m${"x".repeat(180)}\nsecond-line`;
@@ -248,9 +248,10 @@ test("long control-bearing identities stay inert, prefix-retaining, and one-line
       ),
     ];
 
-    for (const component of components) {
+    for (const [index, component] of components.entries()) {
       const output = render(component, 64);
-      assert.equal(output.lines.length, 1);
+      assert.ok(output.lines.length >= 1);
+      assert.ok(output.lines.every((line) => visibleWidth(line) <= 64));
       assert.match(
         output.text,
         new RegExp(`identifying-prefix-${item.operation}`),
@@ -259,6 +260,11 @@ test("long control-bearing identities stay inert, prefix-retaining, and one-line
         output.text,
         /hidden-title|\u0007|second-line|\u001b\]|\u001b\[31m/,
       );
+      if (index === 0) {
+        assert.match(output.lines[0] ?? "", /^╭.*╮$/u);
+      } else {
+        assert.match(output.lines.at(-1) ?? "", /^╰.*╯$/u);
+      }
     }
   }
 });

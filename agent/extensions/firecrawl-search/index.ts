@@ -27,6 +27,11 @@ import {
   type SearchData,
 } from "firecrawl";
 import { Type } from "typebox";
+import {
+  closedToolFrameResult,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import {
   CRAWL_PARAMETER_DESCRIPTIONS,
@@ -523,14 +528,16 @@ function renderCall(
   operation: FirecrawlOperation,
   theme: Theme,
   args: Record<string, unknown>,
+  context: { isError?: boolean; isPartial?: boolean },
 ) {
   const identityKind: IdentityKind = operation === "search" ? "query" : "url";
-  return new FirecrawlRenderComponent(
-    theme,
-    compactIdentity(args[identityKind]),
-    identityKind,
-    { title: operation },
-  );
+  const identity = compactIdentity(args[identityKind]);
+  const renderedIdentity =
+    identityKind === "query" ? `"${identity}"` : identity;
+  const title =
+    theme.fg("toolTitle", theme.bold(`${operation} `)) +
+    theme.fg("accent", renderedIdentity);
+  return closedToolFrameTop(title, toolFrameStatus(context), theme);
 }
 
 function renderResult(
@@ -550,12 +557,13 @@ function renderResult(
       ? "error"
       : "success";
 
-  return new FirecrawlRenderComponent(
+  const statusText = statusFor(operation, details, options.isPartial, isError);
+  const component = new FirecrawlRenderComponent(
     theme,
     compactIdentity(args[identityKind]),
     identityKind,
     {
-      status: statusFor(operation, details, options.isPartial, isError),
+      status: statusText,
       tone,
       hint:
         !options.expanded && !options.isPartial && output
@@ -563,6 +571,12 @@ function renderResult(
           : undefined,
       body: options.expanded && !options.isPartial ? output : undefined,
     },
+  );
+  return closedToolFrameResult(
+    component,
+    options.isPartial ? "pending" : isError ? "error" : "success",
+    theme,
+    theme.fg(tone, statusText),
   );
 }
 
@@ -612,8 +626,9 @@ export default function firecrawlTools(pi: ExtensionAPI) {
           };
         },
       ),
+    renderShell: "self",
     renderCall(_args, theme, context) {
-      return renderCall("search", theme, context.args);
+      return renderCall("search", theme, context.args, context);
     },
     renderResult(result, options, theme, context) {
       return renderResult(
@@ -714,8 +729,9 @@ export default function firecrawlTools(pi: ExtensionAPI) {
           };
         },
       ),
+    renderShell: "self",
     renderCall(_args, theme, context) {
-      return renderCall("crawl", theme, context.args);
+      return renderCall("crawl", theme, context.args, context);
     },
     renderResult(result, options, theme, context) {
       return renderResult(
@@ -787,8 +803,9 @@ export default function firecrawlTools(pi: ExtensionAPI) {
           };
         },
       ),
+    renderShell: "self",
     renderCall(_args, theme, context) {
-      return renderCall("scrape", theme, context.args);
+      return renderCall("scrape", theme, context.args, context);
     },
     renderResult(result, options, theme, context) {
       return renderResult(

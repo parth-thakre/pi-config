@@ -24,10 +24,17 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionUIContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  closedToolFrame,
+  closedToolFrameText,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
 import type { TerminalSnapshot } from "./src/domain.ts";
 import { TerminalManager, type TerminalManagerShape } from "./src/manager.ts";
 import {
@@ -56,6 +63,42 @@ import { sanitizeText } from "./src/ui/output-view.ts";
 import { openTerminalPicker } from "./src/ui/ps.ts";
 
 const WIDGET_KEY = "background-terminals";
+
+function renderTerminalCall(
+  action: string,
+  detail: string,
+  theme: Theme,
+  context: { isError?: boolean; isPartial?: boolean },
+) {
+  const title =
+    theme.fg("toolTitle", theme.bold("terminal ")) +
+    theme.fg("accent", action) +
+    (detail
+      ? theme.fg("dim", ` · ${sanitizeText(detail).replaceAll("\n", " ")}`)
+      : "");
+  return closedToolFrameTop(title, toolFrameStatus(context), theme);
+}
+
+function renderTerminalResult(
+  result: { content?: Array<{ type: string; text?: string }> },
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  context: { isError?: boolean; isPartial?: boolean },
+) {
+  const status = toolFrameStatus(context);
+  const raw = result.content?.find((part) => part.type === "text")?.text ?? "";
+  const lines = sanitizeText(raw).split("\n");
+  const visible = options.expanded ? lines : lines.slice(0, 14);
+  if (!options.expanded && lines.length > visible.length) {
+    visible.push(theme.fg("dim", "… (ctrl+o to expand)"));
+  }
+  const label = context.isError
+    ? theme.fg("error", "failed")
+    : options.isPartial || context.isPartial
+      ? theme.fg("warning", "running")
+      : theme.fg("success", "done");
+  return closedToolFrameText(visible.join("\n"), status, theme, label);
+}
 
 export default function (pi: ExtensionAPI) {
   let runtime: TerminalRuntime | undefined;
@@ -209,6 +252,18 @@ export default function (pi: ExtensionAPI) {
     description: BG_START_TOOL_DESCRIPTION,
     promptSnippet: BG_START_PROMPT_SNIPPET,
     promptGuidelines: BG_START_PROMPT_GUIDELINES,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderTerminalCall(
+        "start",
+        [args.title, args.command].filter(Boolean).join(" · "),
+        theme,
+        context,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderTerminalResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       command: Type.String({
         description: BG_START_PARAMETER_DESCRIPTIONS.command,
@@ -253,6 +308,13 @@ export default function (pi: ExtensionAPI) {
     name: "bg_status",
     label: "Check Background Terminal",
     description: BG_STATUS_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderTerminalCall("status", args.id ?? "", theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderTerminalResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       id: Type.String({ description: BG_STATUS_PARAMETER_DESCRIPTIONS.id }),
     }),
@@ -287,6 +349,13 @@ export default function (pi: ExtensionAPI) {
     name: "bg_list",
     label: "List Background Terminals",
     description: BG_LIST_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(_args, theme, context) {
+      return renderTerminalCall("list", "", theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderTerminalResult(result, options, theme, context);
+    },
     parameters: Type.Object({}),
     async execute() {
       const manager = await getManager();
@@ -313,6 +382,18 @@ export default function (pi: ExtensionAPI) {
     name: "bg_kill",
     label: "Kill Background Terminals",
     description: BG_KILL_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderTerminalCall(
+        "kill",
+        (args.ids ?? []).join(", "),
+        theme,
+        context,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderTerminalResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       ids: Type.Array(Type.String(), {
         description: BG_KILL_PARAMETER_DESCRIPTIONS.ids,
@@ -379,10 +460,10 @@ export default function (pi: ExtensionAPI) {
       const how = killed
         ? "killed"
         : (details.signal ?? `exit ${details.exitCode ?? "?"}`);
-      const header =
+      const title =
         `${icon} ` +
         theme.fg("accent", theme.bold(`terminal ${details.id ?? "?"}`)) +
-        theme.fg("muted", ` · ${details.title ?? ""} · ${how}`);
+        theme.fg("muted", ` · ${details.title ?? ""}`);
 
       const content =
         typeof message.content === "string" ? message.content : "";
@@ -390,29 +471,29 @@ export default function (pi: ExtensionAPI) {
       // of the actual result and must remain visible. The body carries raw
       // process output — sanitize ANSI/control chars or the transcript smears.
       const body = sanitizeText(content.split("\n").slice(1).join("\n").trim());
-
-      if (expanded) {
-        const md = new Markdown(`${body}`, 0, 0, getMarkdownTheme());
-        const container = new Text(header, 0, 0);
-        return {
-          render: (width: number) => [
-            ...container.render(width),
-            ...md.render(width),
-          ],
-          invalidate: () => {
-            container.invalidate();
-            md.invalidate();
-          },
-        };
-      }
-
-      const previewLines = body.split("\n").slice(0, 8);
-      let text = header;
-      for (const line of previewLines)
-        text += `\n${theme.fg("toolOutput", line)}`;
-      if (body.split("\n").length > 8)
-        text += `\n${theme.fg("dim", "... (ctrl+o to expand)")}`;
-      return new Text(text, 0, 0);
+      const component = expanded
+        ? new Markdown(body, 0, 0, getMarkdownTheme())
+        : new Text(
+            body
+              .split("\n")
+              .slice(0, 8)
+              .map((line) => theme.fg("toolOutput", line))
+              .concat(
+                body.split("\n").length > 8
+                  ? [theme.fg("dim", "... (ctrl+o to expand)")]
+                  : [],
+              )
+              .join("\n"),
+            0,
+            0,
+          );
+      return closedToolFrame(
+        title,
+        component,
+        failed ? "error" : "success",
+        theme,
+        theme.fg(failed ? "error" : killed ? "muted" : "success", how),
+      );
     },
   );
 

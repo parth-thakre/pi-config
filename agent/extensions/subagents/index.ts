@@ -26,6 +26,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
   ExtensionUIContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_MAX_BYTES,
@@ -38,6 +39,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  closedToolFrame,
+  closedToolFrameText,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
 import { createDelegatedCostAccounting } from "../shared/delegated-cost.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import {
@@ -77,6 +84,46 @@ import { openSubagentPicker } from "./src/ui/takeover.ts";
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
 const WAIT_PER_AGENT_MAX_BYTES = 16 * 1024;
+
+function renderSubagentCall(
+  action: string,
+  detail: string,
+  theme: Theme,
+  context: { isError?: boolean; isPartial?: boolean },
+) {
+  const title =
+    theme.fg("toolTitle", theme.bold("subagent ")) +
+    theme.fg("accent", action) +
+    (detail
+      ? theme.fg(
+          "dim",
+          ` · ${sanitizeTerminalText(detail).replaceAll("\n", " ")}`,
+        )
+      : "");
+  return closedToolFrameTop(title, toolFrameStatus(context), theme);
+}
+
+function renderSubagentToolResult(
+  result: { content?: Array<{ type: string; text?: string }> },
+  options: { expanded?: boolean; isPartial?: boolean },
+  theme: Theme,
+  context: { isError?: boolean; isPartial?: boolean },
+) {
+  const status = toolFrameStatus(context);
+  const raw = result.content?.find((part) => part.type === "text")?.text ?? "";
+  const clean = sanitizeTerminalText(raw);
+  const lines = clean.split("\n");
+  const visible = options.expanded ? lines : lines.slice(0, 12);
+  if (!options.expanded && lines.length > visible.length) {
+    visible.push(theme.fg("dim", "… (ctrl+o to expand)"));
+  }
+  const label = context.isError
+    ? theme.fg("error", "failed")
+    : options.isPartial || context.isPartial
+      ? theme.fg("warning", "running")
+      : theme.fg("success", "done");
+  return closedToolFrameText(visible.join("\n"), status, theme, label);
+}
 
 function describeSubagent(snap: SubagentSnapshot) {
   const details = [
@@ -237,6 +284,18 @@ export default function (pi: ExtensionAPI) {
     description: SUBAGENT_SPAWN_TOOL_DESCRIPTION,
     promptSnippet: SUBAGENT_SPAWN_PROMPT_SNIPPET,
     promptGuidelines: SUBAGENT_SPAWN_PROMPT_GUIDELINES,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderSubagentCall(
+        "spawn",
+        [args.name, args.model].filter(Boolean).join(" · "),
+        theme,
+        context,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderSubagentToolResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       prompt: Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.prompt,
@@ -321,6 +380,18 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_wait",
     label: "Wait for Subagents",
     description: SUBAGENT_WAIT_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderSubagentCall(
+        "wait",
+        (args.ids ?? []).join(", "),
+        theme,
+        context,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderSubagentToolResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       ids: Type.Array(Type.String(), {
         maxItems: 64,
@@ -409,6 +480,18 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_cancel",
     label: "Cancel Subagents",
     description: SUBAGENT_CANCEL_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderSubagentCall(
+        "cancel",
+        (args.ids ?? []).join(", "),
+        theme,
+        context,
+      );
+    },
+    renderResult(result, options, theme, context) {
+      return renderSubagentToolResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       ids: Type.Array(Type.String(), {
         description: SUBAGENT_CANCEL_PARAMETER_DESCRIPTIONS.ids,
@@ -453,6 +536,13 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_check",
     label: "Check Subagent",
     description: SUBAGENT_CHECK_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      return renderSubagentCall("check", args.id ?? "", theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderSubagentToolResult(result, options, theme, context);
+    },
     parameters: Type.Object({
       id: Type.String({
         description: SUBAGENT_CHECK_PARAMETER_DESCRIPTIONS.id,
@@ -491,6 +581,13 @@ export default function (pi: ExtensionAPI) {
     name: "subagent_list",
     label: "List Subagents",
     description: SUBAGENT_LIST_TOOL_DESCRIPTION,
+    renderShell: "self",
+    renderCall(_args, theme, context) {
+      return renderSubagentCall("list", "", theme, context);
+    },
+    renderResult(result, options, theme, context) {
+      return renderSubagentToolResult(result, options, theme, context);
+    },
     parameters: Type.Object({}),
     async execute() {
       const manager = await getManager();
@@ -533,13 +630,10 @@ export default function (pi: ExtensionAPI) {
         "\n",
         " ",
       );
-      const header =
+      const title =
         `${icon} ` +
         theme.fg("accent", theme.bold(`subagent ${displayId}`)) +
-        theme.fg(
-          "muted",
-          ` · ${displayTitle} · ${failed ? "failed" : "finished"}`,
-        );
+        theme.fg("muted", ` · ${displayTitle}`);
 
       const content = sanitizeTerminalText(
         typeof message.content === "string" ? message.content : "",
@@ -547,29 +641,29 @@ export default function (pi: ExtensionAPI) {
       // Remove only the summary line. The following Error line (when present)
       // is part of the actual result and must remain visible.
       const body = content.split("\n").slice(1).join("\n").trim();
-
-      if (expanded) {
-        const md = new Markdown(`${body}`, 0, 0, getMarkdownTheme());
-        const container = new Text(header, 0, 0);
-        return {
-          render: (width: number) => [
-            ...container.render(width),
-            ...md.render(width),
-          ],
-          invalidate: () => {
-            container.invalidate();
-            md.invalidate();
-          },
-        };
-      }
-
-      const previewLines = body.split("\n").slice(0, 8);
-      let text = header;
-      for (const line of previewLines)
-        text += `\n${theme.fg("toolOutput", line)}`;
-      if (body.split("\n").length > 8)
-        text += `\n${theme.fg("dim", "... (ctrl+o to expand)")}`;
-      return new Text(text, 0, 0);
+      const component = expanded
+        ? new Markdown(body, 0, 0, getMarkdownTheme())
+        : new Text(
+            body
+              .split("\n")
+              .slice(0, 8)
+              .map((line) => theme.fg("toolOutput", line))
+              .concat(
+                body.split("\n").length > 8
+                  ? [theme.fg("dim", "... (ctrl+o to expand)")]
+                  : [],
+              )
+              .join("\n"),
+            0,
+            0,
+          );
+      return closedToolFrame(
+        title,
+        component,
+        failed ? "error" : "success",
+        theme,
+        theme.fg(failed ? "error" : "success", failed ? "failed" : "finished"),
+      );
     },
   );
 

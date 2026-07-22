@@ -3,7 +3,13 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Container, Image, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  closedToolFrameResult,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "./shared/closed-tool-frame.ts";
 import { sanitizeTerminalText } from "./shared/terminal-text.ts";
 
 const TOOLS = [
@@ -215,14 +221,12 @@ export function boundTropeResult(result: TropeResult) {
 
   const notices: string[] = [];
   if (textTruncated) notices.push("text truncated at the aggregate 50KB limit");
-  if (omittedImages > 0) notices.push(`${omittedImages} image(s) omitted by aggregate limits`);
+  if (omittedImages > 0)
+    notices.push(`${omittedImages} image(s) omitted by aggregate limits`);
   if (notices.length > 0) {
     const notice = `[Trope CUA: ${notices.join("; ")}]`;
     const noticeBytes = Buffer.byteLength(notice, "utf8");
-    let excess = Math.max(
-      0,
-      textBytes + noticeBytes - RESULT_TEXT_MAX_BYTES,
-    );
+    let excess = Math.max(0, textBytes + noticeBytes - RESULT_TEXT_MAX_BYTES);
     for (let index = content.length - 1; index >= 0 && excess > 0; index--) {
       const block = content[index];
       if (block?.type !== "text") continue;
@@ -267,7 +271,8 @@ export function boundTropeResult(result: TropeResult) {
 
 function abortableDelay(ms: number, signal?: AbortSignal) {
   if (!signal) return new Promise<void>((resolve) => setTimeout(resolve, ms));
-  if (signal.aborted) return Promise.reject(new Error("Trope CUA call cancelled"));
+  if (signal.aborted)
+    return Promise.reject(new Error("Trope CUA call cancelled"));
   return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       signal.removeEventListener("abort", onAbort);
@@ -300,7 +305,8 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
 
   function startDaemon() {
     if (daemonState.started) return;
-    if (!existsSync(exe)) throw new Error(`Trope CUA is not installed at ${exe}`);
+    if (!existsSync(exe))
+      throw new Error(`Trope CUA is not installed at ${exe}`);
     const child = spawn(exe, ["serve", "--instance", daemonState.instance], {
       detached: true,
       stdio: "ignore",
@@ -358,7 +364,13 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
     const windows =
       (
         result.structuredContent as
-          | { windows?: Array<{ window_id?: number; pid?: number; title?: string }> }
+          | {
+              windows?: Array<{
+                window_id?: number;
+                pid?: number;
+                title?: string;
+              }>;
+            }
           | undefined
       )?.windows ?? [];
     const target = windows.find(
@@ -367,7 +379,9 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
         (window.pid === undefined || window.pid === pid),
     );
     if (!target) {
-      throw new Error(`Window ${pid}/${windowId} was not found during safety validation`);
+      throw new Error(
+        `Window ${pid}/${windowId} was not found during safety validation`,
+      );
     }
     if (target.title?.toLowerCase().includes("private browsing")) {
       throw new Error(
@@ -381,7 +395,8 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
     label: "Trope CUA",
     description:
       "Inspect and operate Windows apps through Trope CUA. Use vision screenshots by default. Supported operations include window/app discovery, screenshots, zoom, clicks, typing, keys, scrolling, element lookup, and app launch. Always use explicit pid/window_id, inspect action receipts, and verify mutations with a new screenshot.",
-    promptSnippet: "Use Trope CUA for all visible Windows GUI inspection and interaction",
+    promptSnippet:
+      "Use Trope CUA for all visible Windows GUI inspection and interaction",
     promptGuidelines: [
       "Use trope_cua instead of computer_* tools for Windows GUI work.",
       "Use trope_cua list_windows, select an explicit pid/window_id, then use get_window_state in vision mode.",
@@ -389,9 +404,46 @@ export default function tropeCuaExtension(pi: ExtensionAPI) {
       "Never use trope_cua on Zen Private Browsing windows unless the user explicitly requests it.",
       "Treat trope_cua receipts as claims, not proof; verify the resulting pixels after click, typing, key, and scroll actions.",
     ],
+    renderShell: "self",
+    renderCall(args, theme, context) {
+      const title =
+        theme.fg("toolTitle", theme.bold("trope_cua ")) +
+        theme.fg("accent", args.tool ?? "operation");
+      return closedToolFrameTop(title, toolFrameStatus(context), theme);
+    },
+    renderResult(result, options, theme, context) {
+      const status = toolFrameStatus(context);
+      const container = new Container();
+      for (const block of result.content) {
+        if (block.type === "text") {
+          container.addChild(
+            new Text(theme.fg("toolOutput", block.text), 0, 0),
+          );
+        } else if (block.type === "image") {
+          container.addChild(
+            new Image(
+              block.data,
+              block.mimeType,
+              { fallbackColor: (text) => theme.fg("dim", text) },
+              {
+                maxWidthCells: 100,
+                maxHeightCells: 30,
+              },
+            ),
+          );
+        }
+      }
+      const label = context.isError
+        ? theme.fg("error", "failed")
+        : options.isPartial
+          ? theme.fg("warning", "running")
+          : theme.fg("success", "done");
+      return closedToolFrameResult(container, status, theme, label);
+    },
     parameters: schema,
     async execute(_toolCallId, params: TropeParams, signal) {
-      if (!existsSync(exe)) throw new Error(`Trope CUA is not installed at ${exe}`);
+      if (!existsSync(exe))
+        throw new Error(`Trope CUA is not installed at ${exe}`);
       validateTropeTarget(params);
       const args = params.args ?? {};
       if (WINDOW_TARGET_TOOLS.has(params.tool)) {

@@ -15,10 +15,14 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Cause, Data, Effect, Exit } from "effect";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
+import {
+  closedToolFrameText,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
 import {
   buildFdArgs,
   buildRgArgs,
@@ -249,10 +253,12 @@ export default function fileSearchTools(pi: ExtensionAPI) {
       return unwrapToolExit(exit, "fd");
     },
 
-    renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("fd "));
-      text += theme.fg("accent", args.pattern ? `"${args.pattern}"` : "(all)");
-      if (args.path) text += theme.fg("muted", ` in ${args.path}`);
+    renderShell: "self",
+
+    renderCall(args, theme, context) {
+      let title = theme.fg("toolTitle", theme.bold("fd "));
+      title += theme.fg("accent", args.pattern ? `"${args.pattern}"` : "(all)");
+      if (args.path) title += theme.fg("muted", ` in ${args.path}`);
       const flags = [
         args.type && `type=${args.type}`,
         args.extension && `ext=${args.extension}`,
@@ -260,15 +266,27 @@ export default function fileSearchTools(pi: ExtensionAPI) {
         args.hidden && "hidden",
         args.max_depth !== undefined && `depth≤${args.max_depth}`,
       ].filter((flag): flag is string => typeof flag === "string");
-      if (flags.length > 0) text += " " + theme.fg("dim", flags.join(" "));
-      return new Text(text, 0, 0);
+      if (flags.length > 0) title += " " + theme.fg("dim", flags.join(" "));
+      return closedToolFrameTop(title, toolFrameStatus(context), theme);
     },
 
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) return new Text(theme.fg("warning", "Searching..."), 0, 0);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const status = toolFrameStatus(context);
+      if (isPartial)
+        return closedToolFrameText(
+          theme.fg("warning", "Searching..."),
+          status,
+          theme,
+          theme.fg("warning", "searching"),
+        );
       const details = result.details;
       if (!details || details.matchCount === 0) {
-        return new Text(theme.fg("dim", "No files found"), 0, 0);
+        return closedToolFrameText(
+          theme.fg("dim", "No files found"),
+          status,
+          theme,
+          theme.fg("dim", "0 entries"),
+        );
       }
       let text = theme.fg(
         "success",
@@ -277,7 +295,12 @@ export default function fileSearchTools(pi: ExtensionAPI) {
       if (details.truncated) text += theme.fg("warning", " (truncated)");
       if (expanded)
         text += expandedPreview(result, details.fullOutputPath, theme);
-      return new Text(text, 0, 0);
+      return closedToolFrameText(
+        text,
+        status,
+        theme,
+        theme.fg("dim", `${details.matchCount} entries`),
+      );
     },
   });
 
@@ -320,10 +343,12 @@ export default function fileSearchTools(pi: ExtensionAPI) {
       return unwrapToolExit(exit, "rg");
     },
 
-    renderCall(args, theme) {
-      let text = theme.fg("toolTitle", theme.bold("rg "));
-      text += theme.fg("accent", `"${args.pattern}"`);
-      if (args.path) text += theme.fg("muted", ` in ${args.path}`);
+    renderShell: "self",
+
+    renderCall(args, theme, context) {
+      let title = theme.fg("toolTitle", theme.bold("rg "));
+      title += theme.fg("accent", `"${args.pattern}"`);
+      if (args.path) title += theme.fg("muted", ` in ${args.path}`);
       const flags = [
         args.glob && `glob=${args.glob}`,
         args.file_type && `type=${args.file_type}`,
@@ -331,15 +356,27 @@ export default function fileSearchTools(pi: ExtensionAPI) {
         args.hidden && "hidden",
         args.context !== undefined && `ctx=${args.context}`,
       ].filter((flag): flag is string => typeof flag === "string");
-      if (flags.length > 0) text += " " + theme.fg("dim", flags.join(" "));
-      return new Text(text, 0, 0);
+      if (flags.length > 0) title += " " + theme.fg("dim", flags.join(" "));
+      return closedToolFrameTop(title, toolFrameStatus(context), theme);
     },
 
-    renderResult(result, { expanded, isPartial }, theme) {
-      if (isPartial) return new Text(theme.fg("warning", "Searching..."), 0, 0);
+    renderResult(result, { expanded, isPartial }, theme, context) {
+      const status = toolFrameStatus(context);
+      if (isPartial)
+        return closedToolFrameText(
+          theme.fg("warning", "Searching..."),
+          status,
+          theme,
+          theme.fg("warning", "searching"),
+        );
       const details = result.details;
       if (!details || details.outputLines === 0) {
-        return new Text(theme.fg("dim", "No matches found"), 0, 0);
+        return closedToolFrameText(
+          theme.fg("dim", "No matches found"),
+          status,
+          theme,
+          theme.fg("dim", "0 matches"),
+        );
       }
       let text = theme.fg(
         "success",
@@ -348,7 +385,12 @@ export default function fileSearchTools(pi: ExtensionAPI) {
       if (details.truncated) text += theme.fg("warning", " (truncated)");
       if (expanded)
         text += expandedPreview(result, details.fullOutputPath, theme);
-      return new Text(text, 0, 0);
+      return closedToolFrameText(
+        text,
+        status,
+        theme,
+        theme.fg("dim", `${details.outputLines} output lines`),
+      );
     },
   });
 }

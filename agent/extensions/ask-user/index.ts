@@ -19,6 +19,11 @@ import {
 import { Cause, Effect, Exit } from "effect";
 import { Type, type Static } from "typebox";
 import {
+  closedToolFrameText,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
+import {
   ASK_USER_PARAMETER_DESCRIPTIONS,
   ASK_USER_PROMPT_GUIDELINES,
   ASK_USER_PROMPT_SNIPPET,
@@ -369,49 +374,63 @@ export default function askUser(pi: ExtensionAPI) {
       );
     },
 
-    renderCall(args, theme, _context) {
-      let text = theme.fg("toolTitle", theme.bold("ask_user "));
-      text += theme.fg(
-        "muted",
-        typeof args.question === "string" ? args.question : "",
-      );
+    renderShell: "self",
+
+    renderCall(args, theme, context) {
+      const title =
+        theme.fg("toolTitle", theme.bold("ask_user ")) +
+        theme.fg(
+          "muted",
+          typeof args.question === "string" ? args.question : "",
+        );
       const opts = Array.isArray(args.options)
         ? (args.options as DisplayOption[])
         : [];
-      if (opts.length > 0) {
-        const numbered = opts.map((o, i) => `${i + 1}. ${o.label}`);
-        text += `\n${theme.fg("dim", `  ${numbered.join("  ")}`)}`;
-      }
-      return new Text(text, 0, 0);
+      const rows = opts.map((option, index) =>
+        theme.fg("dim", ` ${index + 1}. ${option.label}`),
+      );
+      return closedToolFrameTop(title, toolFrameStatus(context), theme, rows);
     },
 
-    renderResult(result, _options, theme, _context) {
+    renderResult(result, _options, theme, context) {
+      const status = toolFrameStatus(context);
       const details = result.details as AskUserDetails | undefined;
       if (!details) {
         const first = result.content[0];
-        return new Text(first?.type === "text" ? first.text : "", 0, 0);
+        return closedToolFrameText(
+          first?.type === "text" ? first.text : "",
+          status,
+          theme,
+        );
       }
 
       if (details.cancelled || details.answer === null) {
-        return new Text(theme.fg("warning", "✗ dismissed"), 0, 0);
+        return closedToolFrameText(
+          theme.fg("warning", "✗ dismissed"),
+          status,
+          theme,
+          theme.fg("warning", "dismissed"),
+        );
       }
 
       if (details.wasCustom) {
-        return new Text(
+        return closedToolFrameText(
           theme.fg("success", "✓ ") +
             theme.fg("muted", "(wrote) ") +
             theme.fg("accent", details.answer),
-          0,
-          0,
+          status,
+          theme,
+          theme.fg("success", "answered"),
         );
       }
 
       const idx = details.options.indexOf(details.answer) + 1;
       const display = idx > 0 ? `${idx}. ${details.answer}` : details.answer;
-      return new Text(
+      return closedToolFrameText(
         theme.fg("success", "✓ ") + theme.fg("accent", display),
-        0,
-        0,
+        status,
+        theme,
+        theme.fg("success", "answered"),
       );
     },
   });

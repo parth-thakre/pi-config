@@ -35,6 +35,13 @@ import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { formatActivityStatus } from "../shared/activity-status.ts";
 import { createDelegatedCostAccounting } from "../shared/delegated-cost.ts";
+import {
+  closedToolFrame,
+  closedToolFrameResult,
+  closedToolFrameText,
+  closedToolFrameTop,
+  toolFrameStatus,
+} from "../shared/closed-tool-frame.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import { createWorkflowPersistence, persistWorkflowJson } from "./artifacts.ts";
 import { RunController } from "./controller.ts";
@@ -339,13 +346,17 @@ export default function workflows(pi: ExtensionAPI) {
 
   pi.registerMessageRenderer(
     WORKFLOW_COMPLETION_MESSAGE_TYPE,
-    (message, _options, theme) =>
-      new Text(
+    (message, _options, theme) => {
+      const details = message.details as
+        { status?: string; name?: string; runId?: string } | undefined;
+      const success = details?.status === "completed";
+      const tone = success ? "success" : "error";
+      const title =
+        theme.fg("toolTitle", theme.bold("workflow ")) +
+        theme.fg("accent", details?.name ?? details?.runId ?? "completed");
+      const body = new Text(
         theme.fg(
-          (message.details as { status?: string } | undefined)?.status ===
-            "completed"
-            ? "success"
-            : "error",
+          tone,
           displayText(
             typeof message.content === "string"
               ? message.content
@@ -354,7 +365,15 @@ export default function workflows(pi: ExtensionAPI) {
         ),
         0,
         0,
-      ),
+      );
+      return closedToolFrame(
+        title,
+        body,
+        success ? "success" : "error",
+        theme,
+        theme.fg(tone, success ? "completed" : "failed"),
+      );
+    },
   );
 
   pi.on("session_shutdown", async () => {
@@ -1042,37 +1061,45 @@ export default function workflows(pi: ExtensionAPI) {
       };
     },
 
-    renderCall(args: Partial<WorkflowInput>, theme) {
+    renderShell: "self",
+
+    renderCall(args: Partial<WorkflowInput>, theme, context) {
       const meta =
         typeof args.script === "string"
           ? extractMeta(args.script)
           : { phases: [] };
-      let text =
+      const title =
         theme.fg("toolTitle", theme.bold("workflow ")) +
         theme.fg(
           "accent",
           displayLine((meta as WorkflowMeta).name ?? "(script)"),
-        );
-      if (args.background) text += theme.fg("dim", " (background)");
+        ) +
+        (args.background ? theme.fg("dim", " (background)") : "");
+      const rows: string[] = [];
       const description = (meta as WorkflowMeta).description;
       if (description)
-        text += `\n  ${theme.fg("dim", displayText(description))}`;
+        rows.push(` ${theme.fg("dim", displayText(description))}`);
       for (const phase of meta.phases.slice(0, 8)) {
-        text += `\n  ${theme.fg("dim", SQUARE)} ${theme.fg("accent", displayLine(phase.title))}${
-          phase.detail ? theme.fg("dim", ` — ${displayLine(phase.detail)}`) : ""
-        }`;
+        rows.push(
+          ` ${theme.fg("dim", SQUARE)} ${theme.fg("accent", displayLine(phase.title))}${
+            phase.detail
+              ? theme.fg("dim", ` · ${displayLine(phase.detail)}`)
+              : ""
+          }`,
+        );
       }
-      return new Text(text, 0, 0);
+      return closedToolFrameTop(title, toolFrameStatus(context), theme, rows);
     },
 
-    renderResult(result, { expanded }, theme) {
+    renderResult(result, { expanded }, theme, context) {
+      const status = toolFrameStatus(context);
       const details = result.details as WorkflowDetails | undefined;
       if (!details) {
         const first = result.content[0];
-        return new Text(
+        return closedToolFrameText(
           displayText(first?.type === "text" ? first.text : "(no output)"),
-          0,
-          0,
+          status,
+          theme,
         );
       }
 
@@ -1109,7 +1136,15 @@ export default function workflows(pi: ExtensionAPI) {
         if (details.error)
           text += `\n  ${theme.fg("error", `Error: ${displayText(details.error)}`)}`;
         text += `\n${theme.fg("muted", `(${keyHint("app.tools.expand", "to expand")})`)}`;
-        return new Text(text, 0, 0);
+        return closedToolFrameText(
+          text,
+          status,
+          theme,
+          theme.fg(
+            "dim",
+            `${settled}/${details.agents.length} agents · ${statusWord(details.status)}`,
+          ),
+        );
       }
 
       const container = new Container();
@@ -1186,7 +1221,15 @@ export default function workflows(pi: ExtensionAPI) {
         container.addChild(new Spacer(1));
         container.addChild(new Text(theme.fg("dim", `Total: ${totals}`), 0, 0));
       }
-      return container;
+      return closedToolFrameResult(
+        container,
+        status,
+        theme,
+        theme.fg(
+          "dim",
+          `${settled}/${details.agents.length} agents · ${elapsed} · ${statusWord(details.status)}`,
+        ),
+      );
     },
   });
 }

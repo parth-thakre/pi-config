@@ -107,6 +107,10 @@ const faceliftReplacements = [
     '\t\tprivate frameSource = "";\n\t\tprivate frameWidth?: number;\n\t\tprivate frameLines?: string[];\n\n\t\toverride setText(value: string): void {\n\t\t\tthis.frameSource = value;\n\t\t\tthis.frameWidth = undefined;\n\t\t\tthis.frameLines = undefined;\n\t\t\tsuper.setText(value);\n\t\t}\n\n\t\toverride invalidate(): void {\n\t\t\tthis.frameWidth = undefined;\n\t\t\tthis.frameLines = undefined;\n\t\t\tsuper.invalidate();\n\t\t}\n\n\t\toverride render(width: number): string[] {\n\t\t\tif (this.frameLines && this.frameWidth === width) return this.frameLines;\n\t\t\tconst resized = resizeClosedFrame(this.frameSource, width);\n\t\t\tif (resized) {\n\t\t\t\tthis.frameWidth = width;\n\t\t\t\tthis.frameLines = resized;\n\t\t\t\treturn resized;\n\t\t\t}\n\t\t\tconst render = BaseTextComponent.prototype.render;\n\t\t\treturn render ? render.call(this, width) : [truncateToWidth(this.frameSource, width, "")];\n\t\t}',
   ],
   [
+    '\t\t\t\tlet exitCode: number | null = d?._type === "bashResult" ? d.exitCode : null;',
+    '\t\t\t\tbodyText = bodyText.replace(/\\r\\n/g, "\\n");\n\t\t\t\tlet exitCode: number | null = d?._type === "bashResult" ? d.exitCode : null;',
+  ],
+  [
     '\t\t\t\tif (exitCode === null && !opt.isPartial && !ctx.isError) exitCode = 0;',
     '\t\t\t\tbodyText = bodyText.replace(/\\n$/, "");\n\t\t\t\tif (exitCode === null && !opt.isPartial && !ctx.isError) exitCode = 0;',
   ],

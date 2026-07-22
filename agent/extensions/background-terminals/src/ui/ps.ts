@@ -14,7 +14,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { formatSize } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  truncateToWidth,
+  visibleWidth,
+  wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import { formatElapsed, formatExit, type TerminalSnapshot } from "../domain.ts";
 import type { TerminalReadModel } from "../manager.ts";
 import { createOutputLineCache, sanitizeText } from "./output-view.ts";
@@ -499,18 +503,27 @@ class TerminalDetailView implements Component {
 
   render(width: number): string[] {
     const theme = this.theme;
-    const border = theme.fg("borderAccent", "─".repeat(Math.max(1, width)));
+    const innerWidth = Math.max(1, width - 2);
+    const edge = (text: string) => theme.fg("borderAccent", text);
+    const top = `${edge("╭")}${edge("─".repeat(innerWidth))}${edge("╮")}`;
+    const divider = `${edge("├")}${edge("─".repeat(innerWidth))}${edge("┤")}`;
+    const bottom = `${edge("╰")}${edge("─".repeat(innerWidth))}${edge("╯")}`;
+    const boxed = (content: string) => {
+      const fitted = truncateToWidth(content, innerWidth);
+      return `${edge("│")}${fitted}${" ".repeat(Math.max(0, innerWidth - visibleWidth(fitted)))}${edge("│")}`;
+    };
     const lines: string[] = [];
     const snap = this.snap();
 
     if (!snap) {
-      lines.push(border);
-      lines.push(theme.fg("dim", `${this.id} is no longer tracked`));
-      lines.push(border);
-      return lines;
+      return [
+        top,
+        boxed(theme.fg("dim", ` ${this.id} is no longer tracked`)),
+        bottom,
+      ];
     }
 
-    lines.push(border);
+    lines.push(top);
     const header =
       `${statusGlyph(snap, theme)} ` +
       theme.fg("accent", theme.bold(`${snap.id} · ${oneLine(snap.title)}`)) +
@@ -522,14 +535,32 @@ class TerminalDetailView implements Component {
         ? theme.fg("muted", ` · ${formatExit(snap)}`)
         : "") +
       theme.fg("dim", ` · ${snap.cwd}`);
-    lines.push(truncateToWidth(header, width));
-    lines.push(
-      truncateToWidth(
-        theme.fg("dim", "$ ") + theme.fg("text", oneLine(snap.command)),
-        width,
-      ),
+    lines.push(boxed(` ${header}`));
+
+    // Wrap commands instead of clipping them at the right edge. Reserve at
+    // least six rows for output if an unusually large command fills the view.
+    const wrappedCommand = wrapTextWithAnsi(
+      oneLine(snap.command),
+      Math.max(10, innerWidth - 3),
     );
-    lines.push(border);
+    if (wrappedCommand.length === 0) wrappedCommand.push("");
+    const maxCommandRows = Math.max(1, this.viewportHeight() - 5);
+    const hiddenCommandRows = Math.max(
+      0,
+      wrappedCommand.length - maxCommandRows,
+    );
+    const commandRows = wrappedCommand.slice(0, maxCommandRows);
+    if (hiddenCommandRows > 0) {
+      commandRows[commandRows.length - 1] = theme.fg(
+        "dim",
+        `… ${hiddenCommandRows} more command lines`,
+      );
+    }
+    for (let index = 0; index < commandRows.length; index++) {
+      const prompt = index === 0 ? theme.fg("dim", "$ ") : "  ";
+      lines.push(boxed(` ${prompt}${theme.fg("text", commandRows[index])}`));
+    }
+    lines.push(divider);
 
     // Stream tab line: which stream is active, both sizes.
     const active = this.stream;
@@ -539,9 +570,8 @@ class TerminalDetailView implements Component {
         ? theme.fg("accent", theme.bold(`${name} (${formatSize(size)})`))
         : theme.fg("dim", `${name} (${formatSize(size)})`);
     lines.push(
-      truncateToWidth(
+      boxed(
         `  ${tab("stdout", snap.stdout.totalBytes)}${theme.fg("dim", " | ")}${tab("stderr", snap.stderr.totalBytes)}${theme.fg("dim", "  — t to switch")}`,
-        width,
       ),
     );
 
@@ -552,15 +582,22 @@ class TerminalDetailView implements Component {
       // The cached view text identity changes with the buffer; totalBytes is a
       // monotonically increasing proxy for a version counter.
       buffer.totalBytes;
-    const output = this.lineCache.get(buffer.text, version, width - 2);
-    const viewport = this.viewportHeight();
+    const output = this.lineCache.get(
+      buffer.text,
+      version,
+      Math.max(1, innerWidth - 2),
+    );
+    const viewport = Math.max(
+      6,
+      this.viewportHeight() - (commandRows.length - 1),
+    );
 
     const noteRows: string[] = [];
     if (snap.errorText) {
       noteRows.push(
         truncateToWidth(
           theme.fg("error", `error: ${oneLine(snap.errorText)}`),
-          width,
+          innerWidth,
         ),
       );
     }
@@ -571,7 +608,7 @@ class TerminalDetailView implements Component {
             "dim",
             `first ${formatSize(buffer.truncatedBytes)} dropped from view — full log: ${buffer.spillPath ?? "(unavailable)"}`,
           ),
-          width,
+          innerWidth,
         ),
       );
     }
@@ -588,7 +625,7 @@ class TerminalDetailView implements Component {
       body.push(theme.fg("dim", `(no ${active} yet)`));
     } else {
       for (const line of visible) {
-        body.push(truncateToWidth(`  ${line}`, width));
+        body.push(truncateToWidth(`  ${line}`, innerWidth));
       }
     }
 
@@ -596,24 +633,23 @@ class TerminalDetailView implements Component {
       body.push(
         truncateToWidth(
           theme.fg("dim", `... ${this.scrollOffset} lines below · ↓/pgdn`),
-          width,
+          innerWidth,
         ),
       );
     }
     while (body.length < viewport) body.push("");
-    lines.push(...body.slice(0, viewport));
+    lines.push(...body.slice(0, viewport).map(boxed));
 
-    lines.push(border);
+    lines.push(divider);
     lines.push(
-      truncateToWidth(
+      boxed(
         theme.fg(
           "dim",
-          `${configuredKeys(this.keybindings, "tui.select.cancel")} back · t stdout/stderr · x kill · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")}/jk scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page · g/G top/bottom`,
+          ` ${configuredKeys(this.keybindings, "tui.select.cancel")} back · t stdout/stderr · x kill · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")}/jk scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page · g/G top/bottom`,
         ),
-        width,
       ),
     );
-    lines.push(border);
+    lines.push(bottom);
     return lines;
   }
 

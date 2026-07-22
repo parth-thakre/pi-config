@@ -23,8 +23,10 @@ import {
   type ExtensionAPI,
   type ExtensionContext,
   type ReadonlyFooterDataProvider,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+  Container,
   getCapabilities,
   hyperlink,
   truncateToWidth,
@@ -57,6 +59,86 @@ function formatDirectory(cwd: string) {
 
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const HORIZONTAL_BORDER = /^─+(?: [↑↓] \d+ more ─*)?$/;
+const SELECTOR_FRAME_STATE = Symbol.for("pi-config.selector-frame-state");
+const BOXED_SELECTORS = new Set([
+  "TreeSelectorComponent",
+  "ModelSelectorComponent",
+  "ScopedModelsSelectorComponent",
+  "SessionSelectorComponent",
+  "SettingsSelectorComponent",
+  "ThemeSelectorComponent",
+  "ThinkingSelectorComponent",
+]);
+
+type SelectorFrameState = {
+  theme?: Theme;
+  originalRender: (this: Container, width: number) => string[];
+};
+
+type FramedContainerPrototype = typeof Container.prototype & {
+  [SELECTOR_FRAME_STATE]?: SelectorFrameState;
+};
+
+function frameSelectorLines(lines: string[], width: number, theme: Theme) {
+  if (width < 3) return lines;
+
+  const innerWidth = width - 2;
+  const plain = (line: string) => line.replace(ANSI_ESCAPE, "");
+  const source = [...lines];
+  while (source.length > 0 && plain(source[0]).trim() === "") source.shift();
+  while (source.length > 0 && plain(source.at(-1) ?? "").trim() === "") {
+    source.pop();
+  }
+
+  const isRule = (line: string) => /^─+$/.test(plain(line));
+  const firstRule = source.findIndex(isRule);
+  let lastRule = -1;
+  for (let index = source.length - 1; index >= 0; index--) {
+    if (isRule(source[index])) {
+      lastRule = index;
+      break;
+    }
+  }
+  const body =
+    firstRule >= 0 && lastRule > firstRule
+      ? source.slice(firstRule + 1, lastRule)
+      : source;
+  const edge = (text: string) => theme.fg("borderAccent", text);
+  const horizontal = (left: string, right: string) =>
+    `${edge(left)}${edge("─".repeat(innerWidth))}${edge(right)}`;
+
+  return [
+    horizontal("╭", "╮"),
+    ...body.map((line) => {
+      if (isRule(line)) return horizontal("├", "┤");
+      const fitted = truncateToWidth(line, innerWidth, "");
+      const fill = " ".repeat(Math.max(0, innerWidth - visibleWidth(fitted)));
+      return `${edge("│")}${fitted}${fill}${edge("│")}`;
+    }),
+    horizontal("╰", "╯"),
+  ];
+}
+
+function installSelectorFrames() {
+  const prototype = Container.prototype as FramedContainerPrototype;
+  if (!prototype[SELECTOR_FRAME_STATE]) {
+    const originalRender = prototype.render;
+    prototype[SELECTOR_FRAME_STATE] = { originalRender };
+    prototype.render = function renderBoxedSelector(width: number) {
+      const state = prototype[SELECTOR_FRAME_STATE];
+      if (!state?.theme || !BOXED_SELECTORS.has(this.constructor.name)) {
+        return originalRender.call(this, width);
+      }
+      const innerWidth = Math.max(1, width - 2);
+      return frameSelectorLines(
+        originalRender.call(this, innerWidth),
+        width,
+        state.theme,
+      );
+    };
+  }
+  return prototype[SELECTOR_FRAME_STATE];
+}
 
 class BoxedEditor extends CustomEditor {
   render(width: number): string[] {
@@ -107,6 +189,7 @@ function columns(left: string, right: string, width: number) {
 }
 
 export default function uiCustomization(pi: ExtensionAPI) {
+  const selectorFrameState = installSelectorFrames();
   let title = "pi";
   let modelInfo = emptyModelInfoState();
   let gitInfo = emptyGitInfoState();
@@ -129,6 +212,7 @@ export default function uiCustomization(pi: ExtensionAPI) {
 
     ctx.ui.setFooter((tui, theme, footerData: ReadonlyFooterDataProvider) => {
       requestRender = () => tui.requestRender();
+      if (selectorFrameState) selectorFrameState.theme = theme;
 
       return {
         invalidate() {},

@@ -67,6 +67,28 @@ const frameReplacements = [
 
 const faceliftReplacements = [
   [
+    'const MAX_PREVIEW_LINES = envInt("FACELIFT_MAX_PREVIEW_LINES", 8);',
+    'const MAX_PREVIEW_LINES = envInt("FACELIFT_MAX_PREVIEW_LINES", 80);\nconst MAX_BASH_PREVIEW_LINES = envInt("FACELIFT_MAX_BASH_PREVIEW_LINES", 8);',
+    "const MAX_BASH_PREVIEW_LINES",
+  ],
+  [
+    'const MAX_PREVIEW_LINES = envInt("FACELIFT_MAX_PREVIEW_LINES", 80);',
+    'const MAX_PREVIEW_LINES = envInt("FACELIFT_MAX_PREVIEW_LINES", 80);\nconst MAX_BASH_PREVIEW_LINES = envInt("FACELIFT_MAX_BASH_PREVIEW_LINES", 8);',
+    "const MAX_BASH_PREVIEW_LINES",
+  ],
+  [
+    'const CACHE_LIMIT = envInt("FACELIFT_CACHE_LIMIT", 128);',
+    'const CACHE_LIMIT = envInt("FACELIFT_CACHE_LIMIT", 32);',
+  ],
+  [
+    '\tcodeToANSI("", "typescript", THEME).catch(() => {});',
+    '\t// Initialize Shiki lazily on the first highlighted result.',
+  ],
+  [
+    '// Pre-warm\ncodeToANSI("", "typescript", THEME).catch(() => {});',
+    '// Shiki is intentionally lazy: pre-warming its engine adds substantial\n// baseline memory even in sessions that never render highlighted source.',
+  ],
+  [
     'function termW(): number {',
     'const ANSI_ESCAPE = /[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:[a-zA-Z\\d]*(?:;[-a-zA-Z\\d\\/#&.:=?%@~_]+)*)?\\u0007)|(?:(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]))/g;\n\nfunction resizeClosedFrame(source: string, requestedWidth: number): string[] | undefined {\n\tif (!source) return undefined;\n\tconst width = Math.max(2, Math.floor(requestedWidth));\n\tconst lines = source.split("\\n");\n\tconst resized: string[] = [];\n\n\tfor (const line of lines) {\n\t\tconst plain = line.replace(ANSI_ESCAPE, "");\n\t\tconst first = plain[0];\n\t\tconst corner = first === "╭" ? "╮" : first === "╰" ? "╯" : first === "│" ? "│" : undefined;\n\t\tif (!corner || plain.at(-1) !== corner) return undefined;\n\n\t\tconst oldWidth = visibleWidth(line);\n\t\tif (oldWidth === width) {\n\t\t\tresized.push(line);\n\t\t\tcontinue;\n\t\t}\n\n\t\tconst cornerIndex = line.lastIndexOf(corner);\n\t\tconst styleIndex = line.lastIndexOf("\\u001b[", cornerIndex);\n\t\tconst rightEdge = line.slice(styleIndex >= 0 ? styleIndex : cornerIndex);\n\t\tconst withoutRight = truncateToWidth(line, Math.max(0, oldWidth - 1), "");\n\t\tconst base = truncateToWidth(withoutRight, width - 1, "");\n\t\tconst fill = (first === "│" ? " " : "─").repeat(\n\t\t\tMath.max(0, width - 1 - visibleWidth(base)),\n\t\t);\n\t\tresized.push(`${base}${fill}${rightEdge}`);\n\t}\n\n\treturn resized;\n}\n\nfunction termW(): number {',
     "function resizeClosedFrame(source: string, requestedWidth: number)",
@@ -78,6 +100,28 @@ const faceliftReplacements = [
   [
     'if (!createReadTool || !TextComponent) return;\n\n\tconst cwd = process.cwd();',
     'if (!createReadTool || !TextComponent) return;\n\n\t// Facelift normally bakes terminal width into Text before the component is\n\t// rendered. Preserve that source, then move the closed right edge to the\n\t// actual width supplied by pi-tui on every render (including after resize).\n\tconst BaseTextComponent = TextComponent as TextComponentCtor & { prototype: { render?: (width: number) => string[] } };\n\tTextComponent = class ResponsiveFrameText extends (BaseTextComponent as any) {\n\t\tprivate frameSource = "";\n\n\t\toverride setText(value: string): void {\n\t\t\tthis.frameSource = value;\n\t\t\tsuper.setText(value);\n\t\t}\n\n\t\toverride render(width: number): string[] {\n\t\t\tconst resized = resizeClosedFrame(this.frameSource, width);\n\t\t\tif (resized) return resized;\n\t\t\tconst render = BaseTextComponent.prototype.render;\n\t\t\treturn render ? render.call(this, width) : [truncateToWidth(this.frameSource, width, "")];\n\t\t}\n\t} as unknown as TextComponentCtor;\n\n\tconst cwd = process.cwd();',
+    "class ResponsiveFrameText extends",
+  ],
+  [
+    '\t\tprivate frameSource = "";\n\n\t\toverride setText(value: string): void {\n\t\t\tthis.frameSource = value;\n\t\t\tsuper.setText(value);\n\t\t}\n\n\t\toverride render(width: number): string[] {\n\t\t\tconst resized = resizeClosedFrame(this.frameSource, width);\n\t\t\tif (resized) return resized;\n\t\t\tconst render = BaseTextComponent.prototype.render;\n\t\t\treturn render ? render.call(this, width) : [truncateToWidth(this.frameSource, width, "")];\n\t\t}',
+    '\t\tprivate frameSource = "";\n\t\tprivate frameWidth?: number;\n\t\tprivate frameLines?: string[];\n\n\t\toverride setText(value: string): void {\n\t\t\tthis.frameSource = value;\n\t\t\tthis.frameWidth = undefined;\n\t\t\tthis.frameLines = undefined;\n\t\t\tsuper.setText(value);\n\t\t}\n\n\t\toverride invalidate(): void {\n\t\t\tthis.frameWidth = undefined;\n\t\t\tthis.frameLines = undefined;\n\t\t\tsuper.invalidate();\n\t\t}\n\n\t\toverride render(width: number): string[] {\n\t\t\tif (this.frameLines && this.frameWidth === width) return this.frameLines;\n\t\t\tconst resized = resizeClosedFrame(this.frameSource, width);\n\t\t\tif (resized) {\n\t\t\t\tthis.frameWidth = width;\n\t\t\t\tthis.frameLines = resized;\n\t\t\t\treturn resized;\n\t\t\t}\n\t\t\tconst render = BaseTextComponent.prototype.render;\n\t\t\treturn render ? render.call(this, width) : [truncateToWidth(this.frameSource, width, "")];\n\t\t}',
+  ],
+  [
+    '\t\t\t\tif (exitCode === null && !opt.isPartial && !ctx.isError) exitCode = 0;',
+    '\t\t\t\tbodyText = bodyText.replace(/\\n$/, "");\n\t\t\t\tif (exitCode === null && !opt.isPartial && !ctx.isError) exitCode = 0;',
+  ],
+  [
+    '\t\t\t\tconst maxShow = ctx.expanded ? lineCount : MAX_PREVIEW_LINES;',
+    '\t\t\t\tconst maxShow = ctx.expanded ? lineCount : MAX_BASH_PREVIEW_LINES;',
+  ],
+  [
+    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = [...show];',
+    '\t\t\t\tconst show = lines.slice(0, Math.max(0, maxShow));\n\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("toolOutput", line),\n\t\t\t\t);',
+    'theme.fg("toolOutput", line.replace(ANSI_ESCAPE, ""))',
+  ],
+  [
+    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("toolOutput", line),\n\t\t\t\t);',
+    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\ttheme.fg("toolOutput", line.replace(ANSI_ESCAPE, "")),\n\t\t\t\t);',
   ],
   [
     '// The full command is always rendered in the title — no length-based\n\t\t\t\t// truncation in compact mode. `frameTop` still right-truncates any\n\t\t\t\t// individual line that exceeds the frame width, which is a separate\n\t\t\t\t// (display-fit) concern from hiding command content.\n\t\t\t\tconst cmdLines = cmd.split("\\n");\n\t\t\t\tconst firstCmd = cmdLines[0];\n\t\t\t\tconst restCmd = cmdLines.slice(1).map((line) => line.replace(/^\\s+/, ""));',

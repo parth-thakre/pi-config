@@ -106,7 +106,9 @@ function dynamicExtensions() {
       existsSync(join(fullPath, "index.ts")) ||
       existsSync(join(fullPath, "index.js"))
     );
-  }).filter((name) => name !== "flow-title");
+  }).filter(
+    (name) => name !== "flow-title" && name !== "ui-customization",
+  );
 }
 
 function dynamicThemes() {

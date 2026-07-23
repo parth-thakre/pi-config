@@ -108,7 +108,7 @@ const faceliftReplacements = [
   ],
   [
     '\t\t\t\tlet exitCode: number | null = d?._type === "bashResult" ? d.exitCode : null;',
-    '\t\t\t\tbodyText = bodyText.replace(/\\r\\n/g, "\\n");\n\t\t\t\tlet exitCode: number | null = d?._type === "bashResult" ? d.exitCode : null;',
+    '\t\t\t\tbodyText = bodyText.replace(/\\r+\\n/g, "\\n");\n\t\t\t\tlet exitCode: number | null = d?._type === "bashResult" ? d.exitCode : null;',
   ],
   [
     '\t\t\t\tif (exitCode === null && !opt.isPartial && !ctx.isError) exitCode = 0;',
@@ -130,6 +130,20 @@ const faceliftReplacements = [
   [
     '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\tline.includes("\\u001b") ? line : theme.fg("text", line),\n\t\t\t\t);',
     '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\ttheme.fg("text", line.replace(ANSI_ESCAPE, "")),\n\t\t\t\t);',
+  ],
+  [
+    'const asTheme = (theme: ThemeLike): Theme => theme as unknown as Theme;\ntype RenderContextLike',
+    'const asTheme = (theme: ThemeLike): Theme => theme as unknown as Theme;\n\n// Lightweight synchronous JSON highlighting for Bash output. Using the host\n// theme keeps structured data readable without eagerly starting Shiki.\nfunction highlightJsonLine(line: string, theme: ThemeLike): string {\n\tconst token = /"(?:\\\\.|[^"\\\\])*"|-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?|\\b(?:true|false|null)\\b|[{}\\[\\],:]/g;\n\tlet result = "";\n\tlet cursor = 0;\n\n\tfor (const match of line.matchAll(token)) {\n\t\tconst index = match.index ?? 0;\n\t\tconst value = match[0];\n\t\tresult += theme.fg("text", line.slice(cursor, index));\n\t\tconst trailing = line.slice(index + value.length);\n\t\tconst color = value.startsWith("\\\"")\n\t\t\t? /^\\s*:/.test(trailing) ? "syntaxVariable" : "syntaxString"\n\t\t\t: /^-?\\d/.test(value) ? "syntaxNumber"\n\t\t\t: /^(?:true|false|null)$/.test(value) ? "syntaxKeyword"\n\t\t\t: "dim";\n\t\tresult += theme.fg(color, value);\n\t\tcursor = index + value.length;\n\t}\n\n\treturn result + theme.fg("text", line.slice(cursor));\n}\n\ntype RenderContextLike',
+    'function highlightJsonLine(line: string, theme: ThemeLike)',
+  ],
+  [
+    '\t\t\t\tconst lineCount = lines.length;\n\t\t\t\tconst lineInfo = summary && lineCount > 1',
+    '\t\t\t\tconst lineCount = lines.length;\n\t\t\t\tlet isJsonOutput = false;\n\t\t\t\tif (bodyText.length <= MAX_HL_CHARS) {\n\t\t\t\t\tconst trimmed = bodyText.trim();\n\t\t\t\t\tif ((trimmed.startsWith("{") && trimmed.endsWith("}")) ||\n\t\t\t\t\t\t(trimmed.startsWith("[") && trimmed.endsWith("]"))) {\n\t\t\t\t\t\ttry {\n\t\t\t\t\t\t\tJSON.parse(trimmed);\n\t\t\t\t\t\t\tisJsonOutput = true;\n\t\t\t\t\t\t} catch {}\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tconst lineInfo = summary && lineCount > 1',
+    'let isJsonOutput = false;',
+  ],
+  [
+    '\t\t\t\tconst out: string[] = show.map((line) =>\n\t\t\t\t\ttheme.fg("text", line.replace(ANSI_ESCAPE, "")),\n\t\t\t\t);',
+    '\t\t\t\tconst out: string[] = show.map((line) => {\n\t\t\t\t\tconst clean = line.replace(ANSI_ESCAPE, "");\n\t\t\t\t\treturn isJsonOutput ? highlightJsonLine(clean, theme) : theme.fg("text", clean);\n\t\t\t\t});',
   ],
   [
     '// The full command is always rendered in the title — no length-based\n\t\t\t\t// truncation in compact mode. `frameTop` still right-truncates any\n\t\t\t\t// individual line that exceeds the frame width, which is a separate\n\t\t\t\t// (display-fit) concern from hiding command content.\n\t\t\t\tconst cmdLines = cmd.split("\\n");\n\t\t\t\tconst firstCmd = cmdLines[0];\n\t\t\t\tconst restCmd = cmdLines.slice(1).map((line) => line.replace(/^\\s+/, ""));',

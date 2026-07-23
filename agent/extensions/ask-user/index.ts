@@ -15,6 +15,7 @@ import {
   matchesKey,
   Text,
   truncateToWidth,
+  visibleWidth,
 } from "@earendil-works/pi-tui";
 import { Cause, Effect, Exit } from "effect";
 import { Type, type Static } from "typebox";
@@ -152,6 +153,7 @@ export default function askUser(pi: ExtensionAPI) {
         ctx.ui.custom<SelectionResult>((tui, theme, _kb, done) => {
           let optionIndex = 0;
           let editMode = false;
+          let cachedWidth: number | undefined;
           let cachedLines: string[] | undefined;
 
           let settled = false;
@@ -194,6 +196,7 @@ export default function askUser(pi: ExtensionAPI) {
           };
 
           function refresh() {
+            cachedWidth = undefined;
             cachedLines = undefined;
             tui.requestRender();
           }
@@ -259,25 +262,32 @@ export default function askUser(pi: ExtensionAPI) {
           }
 
           function render(width: number): string[] {
-            if (cachedLines) return cachedLines;
+            if (cachedLines && cachedWidth === width) return cachedLines;
+            if (width < 3) return [theme.fg("accent", "─".repeat(width))];
 
+            const innerWidth = width - 2;
+            const edge = (text: string) => theme.fg("accent", text);
             const lines: string[] = [];
-            const add = (s: string) => lines.push(truncateToWidth(s, width));
+            const add = (content = "") => {
+              const fitted = truncateToWidth(content, innerWidth, "");
+              const fill = " ".repeat(
+                Math.max(0, innerWidth - visibleWidth(fitted)),
+              );
+              lines.push(`${edge("│")}${fitted}${fill}${edge("│")}`);
+            };
 
             const title = " Question ";
-            add(
-              theme.fg(
-                "accent",
-                `─${title}${"─".repeat(Math.max(0, width - title.length - 1))}`,
-              ),
+            const topFill = "─".repeat(
+              Math.max(0, innerWidth - title.length - 1),
             );
+            lines.push(edge(`╭─${title}${topFill}╮`));
             for (const line of wrapText(
               params.question,
-              Math.max(10, width - 2),
+              Math.max(10, innerWidth - 2),
             )) {
               add(` ${theme.fg("text", theme.bold(line))}`);
             }
-            lines.push("");
+            add();
 
             for (let i = 0; i < allOptions.length; i++) {
               const opt = allOptions[i];
@@ -298,14 +308,34 @@ export default function askUser(pi: ExtensionAPI) {
             }
 
             if (editMode) {
-              lines.push("");
+              add();
               add(theme.fg("muted", " Your answer:"));
-              for (const line of editor.render(width - 2)) {
-                add(` ${line}`);
+              const editorBoxWidth = Math.max(3, innerWidth - 2);
+              const editorLines = editor.render(
+                Math.max(1, editorBoxWidth - 2),
+              );
+              for (let index = 0; index < editorLines.length; index++) {
+                const line = editorLines[index];
+                const fill = " ".repeat(
+                  Math.max(0, editorBoxWidth - 2 - visibleWidth(line)),
+                );
+                const left =
+                  index === 0
+                    ? "╭"
+                    : index === editorLines.length - 1
+                      ? "╰"
+                      : "│";
+                const right =
+                  index === 0
+                    ? "╮"
+                    : index === editorLines.length - 1
+                      ? "╯"
+                      : "│";
+                add(` ${edge(left)}${line}${fill}${edge(right)}`);
               }
             }
 
-            lines.push("");
+            add();
             if (editMode) {
               add(theme.fg("dim", " Enter submit • Esc back to options"));
             } else {
@@ -316,8 +346,9 @@ export default function askUser(pi: ExtensionAPI) {
                 ),
               );
             }
-            add(theme.fg("accent", "─".repeat(width)));
+            lines.push(edge(`╰${"─".repeat(innerWidth)}╯`));
 
+            cachedWidth = width;
             cachedLines = lines;
             return lines;
           }
@@ -325,6 +356,7 @@ export default function askUser(pi: ExtensionAPI) {
           return {
             render,
             invalidate: () => {
+              cachedWidth = undefined;
               cachedLines = undefined;
             },
             handleInput,

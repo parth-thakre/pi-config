@@ -1,0 +1,9 @@
+{
+  "name": "parth-pi-config",
+  "version": "1.0.0",
+  "private": true,
+  "keywords": ["pi-package"],
+  "scripts": {
+    "postinstall": "node scripts/sync-config.mjs"
+  }
+}

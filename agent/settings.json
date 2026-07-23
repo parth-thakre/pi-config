@@ -4,7 +4,10 @@
   "defaultModel": "gpt-5.6-sol",
   "defaultThinkingLevel": "low",
   "hideThinkingBlock": false,
-  "packages": ["npm:@wierdbytes/pi-facelift"],
+  "packages": [
+    "git:github.com/parth-thakre/pi-config",
+    "npm:@wierdbytes/pi-facelift"
+  ],
   "theme": "trans-pride",
   "steeringMode": "one-at-a-time",
   "followUpMode": "one-at-a-time",

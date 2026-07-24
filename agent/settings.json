@@ -6,7 +6,7 @@
   "hideThinkingBlock": false,
   "packages": [
     "git:github.com/parth-thakre/pi-config",
-    "npm:@wierdbytes/pi-facelift"
+    "git:github.com/parth-thakre/pi-wierd-stuff"
   ],
   "theme": "trans-pride",
   "steeringMode": "one-at-a-time",

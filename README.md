@@ -14,7 +14,7 @@ On Linux, Trope CUA is skipped automatically because it is only supported on Win
 
 - Fully overhauled GUI with the `trans-pride` theme, startup header, boxed editor, and compact footer
 - Prettified workflows, background terminals, subagents, dashboards, and tool output
-- Resize-aware Facelift frames with syntax-highlighted reads and diffs
+- A maintained [Facelift fork](https://github.com/parth-thakre/pi-wierd-stuff) with closed resize-aware frames, syntax-highlighted reads and diffs, and a native Trans Pride Shiki theme
 - `fd`, `rg`, Firecrawl, Ask User, and Trope CUA tools
 - Custom models, settings, and keybindings
 
@@ -23,7 +23,7 @@ On Linux, Trope CUA is skipped automatically because it is only supported on Win
 Parts of this setup were copied or adapted from:
 
 - [davis7dotsh/my-pi-setup](https://github.com/davis7dotsh/my-pi-setup)
-- [wierdbytes/pi-wierd-stuff](https://github.com/wierdbytes/pi-wierd-stuff/tree/master/packages/facelift) for Facelift and the tool rendering
+- [wierdbytes/pi-wierd-stuff](https://github.com/wierdbytes/pi-wierd-stuff/tree/master/packages/facelift), the upstream source for the maintained Facelift fork and tool rendering
 
 ## License
 

@@ -5,8 +5,6 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test --experimental-strip-types extensions/background-terminals/*.test.ts extensions/firecrawl-search/*.test.ts extensions/shared/*.test.ts extensions/subagents/manager.test.ts extensions/subagents/result-delivery.test.ts extensions/ui-customization/*.test.ts extensions/workflows/*.test.ts && vitest run extensions/file-search/index.spec.ts",
-    "postinstall": "node scripts/patch-facelift-theme.mjs",
-    "patch:facelift-theme": "node scripts/patch-facelift-theme.mjs",
     "check": "tsc --noEmit -p tsconfig.davis.json",
     "format:check": "prettier --check \"extensions/{ask-user,background-terminals,file-search,model-info,shared,subagents,ui-customization,workflows}/**/*.{ts,cjs}\""
   },

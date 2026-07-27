@@ -431,7 +431,14 @@ test("concurrency cap rejects an extra start; a failed spawn releases its slot",
     );
     assert.equal(spawns.length, MAX_RUNNING);
     await assert.rejects(
-      runTool(runtime, manager.start({ command: nodeCmd("process.exit(0)"), title: "extra", cwd })),
+      runTool(
+        runtime,
+        manager.start({
+          command: nodeCmd("process.exit(0)"),
+          title: "extra",
+          cwd,
+        }),
+      ),
       new RegExp(`Max ${MAX_RUNNING} background terminals`),
     );
 
@@ -528,7 +535,14 @@ test("runtime.dispose kills running processes; no settle hook fires after dispos
   // start after dispose is rejected (by the runtime itself, or by the
   // manager's disposed guard if the effect still runs).
   await assert.rejects(
-    runTool(runtime, manager.start({ command: nodeCmd("process.exit(0)"), title: "late", cwd })),
+    runTool(
+      runtime,
+      manager.start({
+        command: nodeCmd("process.exit(0)"),
+        title: "late",
+        cwd,
+      }),
+    ),
     /shutting down|disposed/,
   );
 });
@@ -548,7 +562,11 @@ test("pruning drops the oldest settled entries past MAX_TRACKED, never running o
     for (let i = 0; i < MAX_TRACKED + 4; i++) {
       const snap = await runTool(
         runtime,
-        manager.start({ command: nodeCmd("process.exit(0)"), title: `quick-${i}`, cwd }),
+        manager.start({
+          command: nodeCmd("process.exit(0)"),
+          title: `quick-${i}`,
+          cwd,
+        }),
       );
       settledIds.push(snap.id);
       await settlement(manager, snap.id);
@@ -723,7 +741,11 @@ test("status returns the snapshot and rejects unknown ids with the known list", 
   await withManager(async (manager, runtime) => {
     const snap = await runTool(
       runtime,
-      manager.start({ command: nodeCmd("process.exit(0)"), title: "status", cwd }),
+      manager.start({
+        command: nodeCmd("process.exit(0)"),
+        title: "status",
+        cwd,
+      }),
     );
     const seen = await runTool(runtime, manager.status(snap.id));
     assert.equal(seen.id, snap.id);

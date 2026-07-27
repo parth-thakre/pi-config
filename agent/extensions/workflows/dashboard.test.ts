@@ -197,6 +197,7 @@ test("workflow transcript renders markdown and separates reasoning from tools", 
 test("subagent and workflow transcripts share markdown, reasoning, and tool language", () => {
   const snapshot: SubagentSnapshot = {
     id: "sub-style",
+    origin: "model",
     backend: "pi",
     title: "child",
     prompt: "prompt",
@@ -256,6 +257,7 @@ test("subagent rendering leaves child/model transcript bytes untouched", () => {
   const raw = "\u001b[31mraw model text\u001b[0m\t\u0007";
   const snapshot: SubagentSnapshot = {
     id: "sub-1",
+    origin: "model",
     backend: "pi",
     title: "child",
     prompt: "prompt",

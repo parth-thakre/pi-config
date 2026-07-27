@@ -4,9 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --experimental-strip-types extensions/background-terminals/*.test.ts extensions/firecrawl-search/*.test.ts extensions/shared/*.test.ts extensions/subagents/manager.test.ts extensions/subagents/result-delivery.test.ts extensions/ui-customization/*.test.ts extensions/workflows/*.test.ts && vitest run extensions/file-search/index.spec.ts",
+    "test": "node --test --experimental-strip-types extensions/background-terminals/*.test.ts extensions/firecrawl-search/*.test.ts extensions/shared/*.test.ts extensions/subagents/*.test.ts extensions/summaries/*.test.ts extensions/ui-customization/*.test.ts extensions/workflows/*.test.ts && vitest run extensions/file-search/index.spec.ts",
     "check": "tsc --noEmit -p tsconfig.davis.json",
-    "format:check": "prettier --check \"extensions/{ask-user,background-terminals,file-search,model-info,shared,subagents,ui-customization,workflows}/**/*.{ts,cjs}\""
+    "format:check": "prettier --check \"extensions/{ask-user,background-terminals,file-search,model-info,shared,subagents,summaries,ui-customization,workflows}/**/*.{ts,cjs}\""
   },
   "keywords": [],
   "author": "",
@@ -16,9 +16,9 @@
     "endOfLine": "auto"
   },
   "dependencies": {
-    "@earendil-works/pi-ai": "^0.80.6",
-    "@earendil-works/pi-coding-agent": "^0.80.6",
-    "@earendil-works/pi-tui": "^0.80.6",
+    "@earendil-works/pi-ai": "^0.82.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-tui": "^0.82.0",
     "@effect/platform-node": "4.0.0-beta.98",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "acorn": "^8.17.0",

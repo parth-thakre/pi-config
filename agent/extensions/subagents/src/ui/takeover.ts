@@ -98,7 +98,28 @@ function composeSubagentPanel(
   return lines.slice(0, panelHeight);
 }
 
-// --- Entry point ---------------------------------------------------------------
+// --- Entry points --------------------------------------------------------------
+
+export interface TakeoverOptions {
+  readonly badge?: string;
+}
+
+export async function openSubagentTakeover(
+  ctx: ExtensionCommandContext,
+  view: SubagentReadModel,
+  id: string,
+  options?: TakeoverOptions,
+) {
+  if (!view.get(id)) return;
+  await ctx.ui.custom<null>(
+    (tui, theme, keybindings, done) =>
+      new TakeoverView(tui, theme, keybindings, id, view, done, options),
+    {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
+    },
+  );
+}
 
 export async function openSubagentPicker(
   ctx: ExtensionCommandContext,
@@ -122,14 +143,7 @@ export async function openSubagentPicker(
     if (!picked) return;
     if (!view.get(picked)) continue;
 
-    await ctx.ui.custom<null>(
-      (tui, theme, keybindings, done) =>
-        new TakeoverView(tui, theme, keybindings, picked, view, done),
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "100%", maxHeight: "100%" },
-      },
-    );
+    await openSubagentTakeover(ctx, view, picked);
     // After leaving the takeover view, fall back to the dashboard.
   }
 }
@@ -352,6 +366,7 @@ class TakeoverView implements Component, Focusable {
   private id: string;
   private view: SubagentReadModel;
   private done: (value: null) => void;
+  private options?: TakeoverOptions;
 
   private input = new Input();
   /** Scroll offset in lines from the bottom of the transcript. 0 = pinned to bottom. */
@@ -377,6 +392,7 @@ class TakeoverView implements Component, Focusable {
     id: string,
     view: SubagentReadModel,
     done: (value: null) => void,
+    options?: TakeoverOptions,
   ) {
     this.tui = tui;
     this.theme = theme;
@@ -384,6 +400,7 @@ class TakeoverView implements Component, Focusable {
     this.id = id;
     this.view = view;
     this.done = done;
+    this.options = options;
     this.unsubscribe = view.subscribeTo(id, () => this.scheduleRender());
     // Elapsed time in the header ticks along at 1Hz.
     this.ticker = setInterval(() => this.tui.requestRender(), 1000);
@@ -492,6 +509,9 @@ class TakeoverView implements Component, Focusable {
     const metadata =
       ` ${statusGlyph(snap, theme)} ` +
       theme.fg("muted", `${snap.status} · ${formatElapsed(snap)}`) +
+      (this.options?.badge
+        ? theme.fg("muted", ` · ${this.options.badge}`)
+        : "") +
       theme.fg(
         "dim",
         ` · ${displayLine(snap.backend)}: ${displayLine(snap.meta.modelLabel ?? "?")}`,

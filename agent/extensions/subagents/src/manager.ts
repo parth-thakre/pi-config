@@ -30,6 +30,7 @@ import type {
   SpawnTask,
   SubagentEvent,
   SubagentMeta,
+  SubagentOrigin,
   SubagentSnapshot,
   SubagentStatus,
   TranscriptItem,
@@ -106,6 +107,7 @@ function boundTranscriptItem(item: TranscriptItem): TranscriptItem {
 /** Mutable snapshot; exposed to readers via the readonly SubagentSnapshot type. */
 interface MutableSnapshot {
   id: string;
+  origin: SubagentOrigin;
   backend: BackendName;
   title: string;
   prompt: string;
@@ -220,7 +222,8 @@ const makeManager = Effect.gen(function* () {
   let changeWaiters: Array<() => void> = [];
   const idListeners = new Map<string, Set<() => void>>();
   const cleanups = new Set<Fiber.Fiber<unknown>>();
-  let counter = 0;
+  let modelCounter = 0;
+  let btwCounter = 0;
   let reserved = 0;
   let disposed = false;
   let onSettled:
@@ -488,7 +491,7 @@ const makeManager = Effect.gen(function* () {
           }
           if (runningCount() + reserved >= MAX_RUNNING) {
             return new ConcurrencyLimitError({
-              message: `Max ${MAX_RUNNING} subagents can run concurrently. Wait for one to finish (subagent_wait) before spawning another.`,
+              message: `Max ${MAX_RUNNING} subagents can run concurrently. Wait for one to finish before spawning another.`,
             });
           }
           reserved++;
@@ -521,7 +524,9 @@ const makeManager = Effect.gen(function* () {
           });
         }
 
-        const id = `sa-${++counter}`;
+        const origin = task.origin ?? "model";
+        const id =
+          origin === "btw" ? `btw-${++btwCounter}` : `sa-${++modelCounter}`;
         const meta = yield* session.meta;
         const boundedMeta: SubagentMeta = {
           ...meta,
@@ -538,6 +543,7 @@ const makeManager = Effect.gen(function* () {
         const entry: Entry = {
           snapshot: {
             id,
+            origin,
             backend: backendName,
             title: boundInitialTail(task.title, 4_096),
             prompt: boundInitialTail(task.prompt, 64 * 1024),

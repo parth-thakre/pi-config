@@ -69,7 +69,7 @@ export default function modelInfo(pi: ExtensionAPI) {
     lastLiveUpdate = 0;
   }
 
-  pi.events.on(REFRESH_CHANNEL, () => {
+  const stopRefreshListener = pi.events.on(REFRESH_CHANNEL, () => {
     if (currentContext) refresh(currentContext);
   });
 
@@ -192,6 +192,7 @@ export default function modelInfo(pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    stopRefreshListener();
     currentContext = undefined;
   });
 }

@@ -420,7 +420,6 @@ const makePiSession = (
           sessionManager: SessionManager.create(task.cwd),
           settingsManager,
           resourceLoader: loader,
-          modelRegistry: registry,
           model,
           thinkingLevel,
           excludeTools: [...CHILD_EXCLUDED_TOOL_NAMES],
@@ -657,7 +656,9 @@ const makePiSession = (
 
     // Session naming is best-effort.
     yield* Effect.try(() =>
-      session.sessionManager.appendSessionInfo(`subagent: ${task.title}`),
+      session.sessionManager.appendSessionInfo(
+        `${task.origin === "btw" ? "btw" : "subagent"}: ${task.title}`,
+      ),
     ).pipe(Effect.ignore);
 
     emit({ _tag: "MetaChanged", meta: currentMeta() });

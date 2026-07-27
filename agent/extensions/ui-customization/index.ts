@@ -41,6 +41,7 @@ import {
   isGitInfoState,
   isModelInfoState,
 } from "../shared/dashboard-state.ts";
+import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 
 function formatTokens(tokens: number) {
   if (tokens < 1_000) return `${tokens}`;
@@ -51,10 +52,11 @@ function formatTokens(tokens: number) {
 function formatDirectory(cwd: string) {
   const home = homedir();
   if (cwd === home) return "~";
-  if (cwd.startsWith(`${home}/`) || cwd.startsWith(`${home}\\`)) {
-    return `~/${relative(home, cwd)}`;
-  }
-  return cwd;
+  const display =
+    cwd.startsWith(`${home}/`) || cwd.startsWith(`${home}\\`)
+      ? `~/${relative(home, cwd)}`
+      : cwd;
+  return sanitizeTerminalText(display).replaceAll("\n", "");
 }
 
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;

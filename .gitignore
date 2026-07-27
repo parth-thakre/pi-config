@@ -4,6 +4,7 @@
 auth.json
 azure-foundry.json
 trust.json
+summaries.private.json
 *credentials*
 *secret*
 

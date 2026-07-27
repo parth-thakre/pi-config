@@ -14,6 +14,8 @@ On Linux, Trope CUA is skipped automatically because it is only supported on Win
 
 - Fully overhauled GUI with the `trans-pride` theme, startup header, boxed editor, and compact footer
 - Prettified workflows, background terminals, subagents, dashboards, and tool output
+- Automatic post-run recaps with a private `/summary-model` picker
+- `/btw` side questions that run alongside the main agent without entering its context
 - A maintained [Facelift fork](https://github.com/parth-thakre/pi-wierd-stuff) with closed resize-aware frames, syntax-highlighted reads and diffs, and a native Trans Pride Shiki theme
 - `fd`, `rg`, Firecrawl, Ask User, and Trope CUA tools
 - Custom models, settings, and keybindings

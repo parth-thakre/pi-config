@@ -6,7 +6,8 @@ import { spawnSync } from "node:child_process";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const source = join(root, "agent");
-const target = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
+const target =
+  process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
 
 const directories = [
   "extensions",
@@ -37,7 +38,14 @@ for (const name of files) {
   await cp(join(source, name), join(target, name), { force: true });
 }
 
-const install = spawnSync("npm", ["install", "--omit=dev", "--ignore-scripts"], {
+const npmCommand =
+  process.platform === "win32"
+    ? [
+        process.env.ComSpec || "cmd.exe",
+        ["/d", "/s", "/c", "npm install --omit=dev --ignore-scripts"],
+      ]
+    : ["npm", ["install", "--omit=dev", "--ignore-scripts"]];
+const install = spawnSync(npmCommand[0], npmCommand[1], {
   cwd: target,
   stdio: "inherit",
 });

@@ -192,6 +192,7 @@ export default function (pi: ExtensionAPI) {
   let sessionContext: ExtensionContext | undefined;
   let ui: ExtensionUIContext | undefined;
   let unsubStatus: (() => void) | undefined;
+  let lastStatus: string | undefined;
   const resultDelivery = createDeferredResultDelivery<SubagentSnapshot>();
 
   const getRuntime = () => (runtime ??= createSubagentRuntime());
@@ -213,17 +214,20 @@ export default function (pi: ExtensionAPI) {
   const updateStatus = (manager: SubagentManagerShape) => {
     if (!ui) return;
     const subs = manager.view.list();
-    if (subs.length === 0) {
-      ui.setStatus("subagents", undefined);
-      return;
+    let nextStatus: string | undefined;
+    if (subs.length > 0) {
+      const running = subs.filter((snap) => snap.status === "running").length;
+      const failed = subs.filter((snap) => snap.status === "error").length;
+      const done = subs.length - running - failed;
+      nextStatus = formatActivityStatus(ui.theme, { running, done, failed });
     }
-    const running = subs.filter((snap) => snap.status === "running").length;
-    const failed = subs.filter((snap) => snap.status === "error").length;
-    const done = subs.length - running - failed;
-    ui.setStatus(
-      "subagents",
-      formatActivityStatus(ui.theme, { running, done, failed }),
-    );
+
+    // The manager publishes token-level transcript changes. setStatus requests
+    // a parent full-screen repaint, but the footer only depends on lifecycle
+    // counts; avoid repainting the parent for every child token.
+    if (nextStatus === lastStatus) return;
+    lastStatus = nextStatus;
+    ui.setStatus("subagents", nextStatus);
   };
 
   const deliverResult = (snap: SubagentSnapshot) => {
@@ -294,6 +298,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", (_event, ctx) => {
     sessionContext = ctx;
+    lastStatus = undefined;
     if (ctx.hasUI) ui = ctx.ui;
   });
 
@@ -306,6 +311,7 @@ export default function (pi: ExtensionAPI) {
     unsubStatus?.();
     unsubStatus = undefined;
     ui?.setStatus("subagents", undefined);
+    lastStatus = undefined;
     ui = undefined;
     const closing = runtime;
     runtime = undefined;

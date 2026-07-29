@@ -41,6 +41,7 @@ const CHILD_SHUTDOWN_TIMEOUT_MS = 5_000;
 const CHILD_TOOL_CALL_TIMEOUT_MS = 3 * 60 * 1_000;
 const TOOL_PREVIEW_MAX_BYTES = 4 * 1024;
 const TRANSCRIPT_PART_MAX_BYTES = 8 * 1024;
+const DELTA_FLUSH_INTERVAL_MS = 100;
 
 /** Tools that headless children must not receive. Everything else stays enabled. */
 const CHILD_EXCLUDED_TOOL_NAMES = [
@@ -452,6 +453,37 @@ const makePiSession = (
       Queue.offerUnsafe(events, event);
     };
 
+    // Provider streams can produce hundreds of tiny deltas per second. Folding
+    // each one copies the bounded live transcript and notifies every dashboard
+    // listener. Batch them to a smooth 10 Hz without changing final messages.
+    let pendingText = "";
+    let pendingThinking = "";
+    let deltaTimer: ReturnType<typeof setTimeout> | undefined;
+    const flushDeltas = () => {
+      if (deltaTimer) clearTimeout(deltaTimer);
+      deltaTimer = undefined;
+      if (pendingText) {
+        emit({ _tag: "AssistantDelta", kind: "text", delta: pendingText });
+        pendingText = "";
+      }
+      if (pendingThinking) {
+        emit({
+          _tag: "AssistantDelta",
+          kind: "thinking",
+          delta: pendingThinking,
+        });
+        pendingThinking = "";
+      }
+    };
+    const queueDelta = (kind: "text" | "thinking", delta: string) => {
+      if (kind === "text") pendingText += delta;
+      else pendingThinking += delta;
+      if (deltaTimer) return;
+      deltaTimer = setTimeout(() => {
+        if (!state.closed) flushDeltas();
+      }, DELTA_FLUSH_INTERVAL_MS);
+    };
+
     const toolTimeout = createToolCallTimeoutGuard();
     toolTimeout.apply(session);
 
@@ -535,6 +567,8 @@ const makePiSession = (
 
     const handleEvent = (event: AgentSessionEvent) => {
       if (state.closed) return;
+      // Preserve event ordering around message/tool lifecycle boundaries.
+      if (event.type !== "message_update") flushDeltas();
       switch (event.type) {
         case "agent_start":
           // Extensions may register tools between runs; guard new ones too.
@@ -545,17 +579,9 @@ const makePiSession = (
         case "message_update": {
           const streamEvent = event.assistantMessageEvent;
           if (streamEvent.type === "text_delta") {
-            emit({
-              _tag: "AssistantDelta",
-              kind: "text",
-              delta: streamEvent.delta,
-            });
+            queueDelta("text", streamEvent.delta);
           } else if (streamEvent.type === "thinking_delta") {
-            emit({
-              _tag: "AssistantDelta",
-              kind: "thinking",
-              delta: streamEvent.delta,
-            });
+            queueDelta("thinking", streamEvent.delta);
           }
           break;
         }
@@ -629,6 +655,10 @@ const makePiSession = (
     yield* Effect.addFinalizer(() =>
       Effect.promise(async () => {
         state.closed = true;
+        if (deltaTimer) clearTimeout(deltaTimer);
+        deltaTimer = undefined;
+        pendingText = "";
+        pendingThinking = "";
         unsubscribe();
         try {
           session.clearQueue();

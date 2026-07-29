@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { renderHeader } from "../flow-title.ts";
+import modelInfo from "../model-info/index.ts";
 import { boundTropeResult, validateTropeTarget } from "../trope-cua.ts";
 
 test("flow title truncates every header line to the render width", () => {
@@ -16,6 +17,63 @@ test("flow title truncates every header line to the render width", () => {
     const lines = renderHeader(width, ctx);
     assert.ok(lines.every((line) => visibleWidth(line) <= width));
   }
+});
+
+test("flow title reuses rendered lines for unchanged model and width", () => {
+  const ctx = {
+    model: { id: "cached-model", provider: "cached-provider" },
+  } as unknown as ExtensionContext;
+
+  assert.equal(renderHeader(80, ctx), renderHeader(80, ctx));
+  assert.notEqual(renderHeader(79, ctx), renderHeader(80, ctx));
+});
+
+test("model info scans historical session cost only once at startup", () => {
+  const handlers = new Map<string, (...args: any[]) => void>();
+  let branchReads = 0;
+  const pi = {
+    events: {
+      on: () => () => {},
+      emit: () => {},
+    },
+    on: (name: string, handler: (...args: any[]) => void) => {
+      handlers.set(name, handler);
+    },
+    getThinkingLevel: () => "low",
+  } as any;
+  const ctx = {
+    model: {
+      id: "model",
+      name: "Model",
+      provider: "provider",
+      reasoning: true,
+      contextWindow: 100_000,
+    },
+    sessionManager: {
+      getBranch: () => {
+        branchReads += 1;
+        return [
+          {
+            type: "message",
+            message: { role: "assistant", usage: { cost: { total: 1 } } },
+          },
+        ];
+      },
+    },
+    getContextUsage: () => ({
+      tokens: 1_000,
+      contextWindow: 100_000,
+      percent: 1,
+    }),
+  } as any;
+
+  modelInfo(pi);
+  handlers.get("session_start")?.({}, ctx);
+  handlers.get("agent_start")?.({}, ctx);
+  handlers.get("turn_end")?.({}, ctx);
+  handlers.get("agent_settled")?.({}, ctx);
+
+  assert.equal(branchReads, 1);
 });
 
 test("Trope window operations require an explicit pid/window_id pair", () => {

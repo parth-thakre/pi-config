@@ -36,10 +36,12 @@ import {
 import { OutputBuffer } from "./output.ts";
 
 export const MAX_RUNNING = 8;
-export const MAX_TRACKED = 32;
+// Full output remains available in the private spill file. Keep the in-memory
+// dashboard history modest so repeated terminals cannot retain 100+ MiB.
+export const MAX_TRACKED = 16;
 const MAX_SETTLED_HISTORY = MAX_TRACKED * 4;
 /** In-memory retained cap per stream. */
-export const RETAINED_PER_STREAM = 2 * 1024 * 1024;
+export const RETAINED_PER_STREAM = 512 * 1024;
 /** Private full-log spills are bounded so a firehose cannot fill the temp disk. */
 export const MAX_SPILL_BYTES_PER_STREAM = 256 * 1024 * 1024;
 const STOP_TIMEOUT_MS = 5_000;

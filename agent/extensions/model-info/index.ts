@@ -9,11 +9,13 @@ import {
 } from "../shared/dashboard-state.ts";
 
 const CHARS_PER_ESTIMATED_TOKEN = 4;
-const LIVE_UPDATE_INTERVAL_MS = 250;
+// The core stream already repaints for text deltas. Keep the optional TPS
+// footer refresh slow enough that it does not add significant full-screen work.
+const LIVE_UPDATE_INTERVAL_MS = 1_000;
 const MIN_LIVE_SAMPLE_MS = 1_000;
 const MIN_FINAL_SAMPLE_MS = 250;
 
-function getSessionCost(ctx: ExtensionContext) {
+function calculateSessionCost(ctx: ExtensionContext) {
   let cost = 0;
 
   for (const entry of ctx.sessionManager.getBranch()) {
@@ -38,6 +40,7 @@ export default function modelInfo(pi: ExtensionAPI) {
   let runContentTokens = 0;
   let runContentStreamMs = 0;
   let lastLiveUpdate = 0;
+  let sessionCost = 0;
   let currentContext: ExtensionContext | undefined;
 
   const publish = () => pi.events.emit(MODEL_INFO_CHANNEL, { ...state });
@@ -56,7 +59,7 @@ export default function modelInfo(pi: ExtensionAPI) {
       contextTokens: usage?.tokens ?? null,
       contextWindow: usage?.contextWindow ?? model?.contextWindow ?? 0,
       contextPercent: usage?.percent ?? null,
-      cost: getSessionCost(ctx),
+      cost: sessionCost,
     };
     publish();
   }
@@ -77,6 +80,9 @@ export default function modelInfo(pi: ExtensionAPI) {
     resetMessageTracking();
     runContentTokens = 0;
     runContentStreamMs = 0;
+    // Reconstruct once when loading a session. Re-scanning the complete branch
+    // on every refresh makes turn-finalization progressively more expensive.
+    sessionCost = calculateSessionCost(ctx);
     state = { ...state, tokensPerSecond: null, generating: false };
     refresh(ctx);
   });
@@ -180,6 +186,7 @@ export default function modelInfo(pi: ExtensionAPI) {
       }
     }
 
+    sessionCost += event.message.usage.cost.total;
     resetMessageTracking();
     refresh(ctx);
   });

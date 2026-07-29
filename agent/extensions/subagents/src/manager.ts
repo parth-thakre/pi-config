@@ -45,14 +45,17 @@ import {
 import { boundInitialTail } from "./bounds.ts";
 
 export const MAX_RUNNING = 4;
-export const MAX_TRACKED = 64;
+// Settled entries retain child sessions and extension runtimes so they can be
+// reopened or restarted. Keep only a modest recent set; 64 long-lived children
+// caused memory and event-loop overhead to accumulate across repeated runs.
+export const MAX_TRACKED = 16;
 const STOP_TIMEOUT_MS = 5_000;
 const ERROR_TEXT_MAX_LENGTH = 4_096;
 const FINAL_TEXT_MAX_BYTES = 128 * 1024;
-const LIVE_ASSISTANT_MAX_BYTES = 64 * 1024;
-const TRANSCRIPT_MAX_ENTRIES = 256;
-const TRANSCRIPT_INITIAL_ENTRIES = 24;
-const TRANSCRIPT_MAX_BYTES = 512 * 1024;
+const LIVE_ASSISTANT_MAX_BYTES = 32 * 1024;
+const TRANSCRIPT_MAX_ENTRIES = 128;
+const TRANSCRIPT_INITIAL_ENTRIES = 16;
+const TRANSCRIPT_MAX_BYTES = 128 * 1024;
 const TRANSCRIPT_FIELD_MAX_BYTES = 16 * 1024;
 const TRANSCRIPT_PART_MAX_BYTES = 8 * 1024;
 const TRANSCRIPT_PART_MAX_COUNT = 32;
@@ -605,13 +608,18 @@ const makeManager = Effect.gen(function* () {
     Effect.suspend(() => {
       const unique = [...new Set(ids)];
       addInterest(unique);
+      let lastPendingKey: string | undefined;
       const loop = Effect.gen(function* () {
         while (true) {
           const pending = unique.filter(
             (id) => entries.get(id)?.snapshot.status === "running",
           );
           if (pending.length === 0) return;
-          onPending?.(pending);
+          const pendingKey = pending.join("\u0000");
+          if (pendingKey !== lastPendingKey) {
+            lastPendingKey = pendingKey;
+            onPending?.(pending);
+          }
           yield* nextChange;
         }
       });

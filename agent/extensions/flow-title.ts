@@ -200,7 +200,10 @@ function frame(lines: string[], width: number, heading: string): string[] {
   );
 }
 
-export function renderHeader(width: number, ctx: ExtensionContext): string[] {
+const HEADER_CACHE_LIMIT = 8;
+const headerCache = new Map<string, string[]>();
+
+function buildHeader(width: number, ctx: ExtensionContext): string[] {
   const provider = providerName(ctx);
   const margin = " ".repeat(MARGIN);
   const pillIndent = MARGIN + ART_WIDTH + ART_GAP;
@@ -236,6 +239,21 @@ export function renderHeader(width: number, ctx: ExtensionContext): string[] {
     ? fg(PINK, model) + fg(MUTED, ` · ${provider.toLowerCase()}`)
     : fg(PINK, model);
   return frame(lines, width, truncateToWidth(heading, width - 8, "…"));
+}
+
+export function renderHeader(width: number, ctx: ExtensionContext): string[] {
+  const key = `${width}\u0000${providerName(ctx)}\u0000${modelName(ctx)}`;
+  const cached = headerCache.get(key);
+  if (cached) return cached;
+
+  const rendered = buildHeader(width, ctx);
+  headerCache.set(key, rendered);
+  while (headerCache.size > HEADER_CACHE_LIMIT) {
+    const oldest = headerCache.keys().next().value;
+    if (oldest === undefined) break;
+    headerCache.delete(oldest);
+  }
+  return rendered;
 }
 
 export default function (pi: ExtensionAPI) {

@@ -103,7 +103,9 @@ import {
 } from "./worktree.ts";
 
 const PREVIEW_LENGTH = 200;
-const EMIT_INTERVAL_MS = 120;
+// Blocking workflows update their tool row at a readable 4 Hz; faster updates
+// repeatedly repaint the full parent transcript without adding useful detail.
+const EMIT_INTERVAL_MS = 250;
 
 const THINKING_LEVELS = [
   "off",

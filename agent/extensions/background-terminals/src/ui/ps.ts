@@ -134,6 +134,7 @@ class TerminalDashboard implements Component {
 
   private closed = false;
   private ticker: ReturnType<typeof setInterval>;
+  private renderTimer?: ReturnType<typeof setTimeout>;
   private unsubChange: () => void;
 
   constructor(
@@ -152,7 +153,15 @@ class TerminalDashboard implements Component {
     this.done = done;
     // Elapsed times and output sizes tick along at 1Hz.
     this.ticker = setInterval(() => this.tui.requestRender(), 1000);
-    this.unsubChange = view.subscribe(() => this.tui.requestRender());
+    this.unsubChange = view.subscribe(() => this.scheduleRender());
+  }
+
+  private scheduleRender() {
+    if (this.renderTimer) return;
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = undefined;
+      if (!this.closed) this.tui.requestRender();
+    }, 100);
   }
 
   private terminals(): ReadonlyArray<TerminalSnapshot> {
@@ -163,6 +172,8 @@ class TerminalDashboard implements Component {
     if (this.closed) return false;
     this.closed = true;
     clearInterval(this.ticker);
+    if (this.renderTimer) clearTimeout(this.renderTimer);
+    this.renderTimer = undefined;
     this.unsubChange();
     return true;
   }
@@ -415,7 +426,7 @@ class TerminalDetailView implements Component {
     this.renderTimer = setTimeout(() => {
       this.renderTimer = undefined;
       if (!this.closed) this.tui.requestRender();
-    }, 50);
+    }, 100);
   }
 
   private cleanup() {

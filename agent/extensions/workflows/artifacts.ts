@@ -8,7 +8,9 @@ import * as path from "node:path";
 
 const ARTIFACT_TRANSCRIPT_MAX_BYTES = 32 * 1024;
 const ARTIFACT_TRANSCRIPT_ENTRY_MAX_BYTES = 8 * 1024;
-export const WORKFLOW_CHECKPOINT_INTERVAL_MS = 500;
+// Live artifacts remain current enough for the dashboard while avoiding two
+// atomic multi-file rewrites per second for every active workflow.
+export const WORKFLOW_CHECKPOINT_INTERVAL_MS = 1_000;
 const ENTRY_TRUNCATION_MARKER = "\n[entry truncated]";
 const TRANSCRIPT_TRUNCATION_MARKER =
   "[artifact transcript truncated: older entries omitted]";

@@ -1,6 +1,6 @@
 /**
- * Subagents — spawn background in-process Pi subagents through an Effect
- * service interface.
+ * Subagents — spawn background subagents on Pi, Claude Code, or Codex
+ * through one Effect service interface.
  *
  * Tools (for the parent LLM):
  * - subagent_spawn: fire-and-forget spawn (prompt, title, agent, working_dir,
@@ -13,10 +13,10 @@
  * Unawaited subagents queue their result as a follow-up message when they
  * settle. `/subagents` opens a picker + full interactive takeover view.
  *
- * Architecture: Effect v4 generators throughout (backend -> manager ->
+ * Architecture: Effect v4 generators throughout (backends -> manager ->
  * runtime); this file is the async boundary where tool handlers run effects
- * against one shared ManagedRuntime. The active backend uses in-process Pi SDK
- * sessions.
+ * against one shared ManagedRuntime. Pi runs in-process SDK sessions, Claude
+ * uses the Claude Agent SDK, and Codex speaks JSON-RPC to `codex app-server`.
  */
 
 import * as fs from "node:fs";
@@ -50,6 +50,7 @@ import {
 import { createDelegatedCostAccounting } from "../shared/delegated-cost.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 import {
+  BACKEND_NAMES,
   formatElapsed,
   latestText,
   REASONING_EFFORTS,
@@ -333,7 +334,7 @@ export default function (pi: ExtensionAPI) {
     renderCall(args, theme, context) {
       return renderSubagentCall(
         "spawn",
-        [args.name, args.model].filter(Boolean).join(" · "),
+        [args.name, args.harness, args.model].filter(Boolean).join(" · "),
         theme,
         context,
       );
@@ -347,6 +348,9 @@ export default function (pi: ExtensionAPI) {
       }),
       name: Type.String({
         description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.name,
+      }),
+      harness: StringEnum(BACKEND_NAMES, {
+        description: SUBAGENT_SPAWN_PARAMETER_DESCRIPTIONS.harness,
       }),
       working_dir: Type.Optional(
         Type.String({
@@ -366,7 +370,7 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const manager = await getManager();
-      const harness = "pi" as const;
+      const harness = params.harness;
 
       const cwd = path.resolve(ctx.cwd, params.working_dir ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -406,6 +410,7 @@ export default function (pi: ExtensionAPI) {
             text: buildSubagentSpawnResult({
               id: snap.id,
               title: snap.title,
+              harness,
               modelLabel: snap.meta.modelLabel ?? "?",
               cwd,
             }),

@@ -32,7 +32,12 @@ const files = [
 await mkdir(target, { recursive: true });
 for (const name of directories) {
   await rm(join(target, name), { recursive: true, force: true });
-  await cp(join(source, name), join(target, name), { recursive: true });
+  await cp(join(source, name), join(target, name), {
+    recursive: true,
+    // Never copy a developer's nested install into the live config. Nested
+    // node_modules can shadow the versions installed from agent/package.json.
+    filter: (entry) => !entry.split(/[\\/]/).includes("node_modules"),
+  });
 }
 for (const name of files) {
   await cp(join(source, name), join(target, name), { force: true });

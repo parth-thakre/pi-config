@@ -26,6 +26,36 @@ Pi can use any model shown by `pi --list-models`. Prefer `provider/model-id`; a 
 
 **Thinking budgets:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. These map directly to pi thinking levels.
 
+## Claude Code Harness
+
+**Harness:** `claude`
+**Prompt nicknames:** “claude”, “Claude Code”, “claude agent”, “claude subagent”, “cc”
+**Best default:** Use `fable` at high reasoning unless the user specifies otherwise.
+
+| Model hint | Model               | Recommended effort |
+| ---------- | ------------------- | ------------------ |
+| `fable`    | latest Claude Fable | `high`             |
+
+**Thinking budgets:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. The extension maps these to Claude thinking-token budgets: 0, 1,024, 4,096, 10,000, 16,000, 32,000, and 63,999 tokens respectively.
+
+Requires Claude Code to be installed and authenticated.
+
+## Codex Harness
+
+**Harness:** `codex`
+**Prompt nicknames:** “codex”, “Codex CLI”, “codex agent”, “codex subagent”
+**Best default:** Use `gpt-5.6-sol` with `high` effort for coding work unless the user specifically requests another model.
+
+| Model           | Recommended effort |
+| --------------- | ------------------ |
+| `gpt-5.6-sol`   | `high`             |
+| `gpt-5.6-terra` | `high`             |
+| `gpt-5.6-luna`  | `high`             |
+
+**Thinking budgets accepted by the extension:** `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Codex maps these to the nearest effort supported by the selected model; `off`/`minimal` become `minimal`, while `max` becomes the highest supported Codex effort.
+
+Requires the Codex CLI to be installed and authenticated.
+
 ## Spawn and Manage
 
 Call `subagent_spawn` with a complete `prompt`, short `name`, chosen `harness`, and optional `working_dir`, `model`, and `reasoning_effort`. At most four subagents run concurrently.

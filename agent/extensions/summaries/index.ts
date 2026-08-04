@@ -8,6 +8,7 @@ import {
   buildFallbackRecap,
   createRunBoundary,
   getRunEntries,
+  isAbortedRun,
   serializeRunTranscript,
 } from "./src/transcript.ts";
 import {
@@ -79,7 +80,7 @@ export default function (pi: ExtensionAPI) {
       ctx.sessionManager.getBranch(),
       run.baselineLeafId,
     );
-    if (entries.length === 0) return;
+    if (entries.length === 0 || isAbortedRun(entries)) return;
 
     const config = loadSummaryConfig();
     const controller = new AbortController();

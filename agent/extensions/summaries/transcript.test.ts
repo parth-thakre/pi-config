@@ -4,6 +4,7 @@ import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   createRunBoundary,
   getRunEntries,
+  isAbortedRun,
   serializeRunTranscript,
   TRANSCRIPT_MAX_BYTES,
 } from "./src/transcript.ts";
@@ -51,6 +52,32 @@ test("run slicing starts after the before_agent_start leaf", () => {
     ["new"],
   );
   assert.deepEqual(getRunEntries(entries, "missing"), []);
+});
+
+test("detects aborted runs without treating successful runs as aborted", () => {
+  const aborted = entry("aborted", {
+    role: "assistant",
+    content: [{ type: "text", text: "partial work" }],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    usage,
+    stopReason: "aborted",
+    timestamp: 1,
+  });
+  const completed = entry("completed", {
+    role: "assistant",
+    content: [{ type: "text", text: "done" }],
+    api: "openai-codex-responses",
+    provider: "openai-codex",
+    model: "gpt-5.6-luna",
+    usage,
+    stopReason: "stop",
+    timestamp: 2,
+  });
+
+  assert.equal(isAbortedRun([aborted]), true);
+  assert.equal(isAbortedRun([completed]), false);
 });
 
 test("transcript omits thinking, images, and recap entries while redacting tool data", () => {

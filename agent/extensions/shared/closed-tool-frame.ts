@@ -8,6 +8,14 @@ import {
 
 export type ToolFrameStatus = "pending" | "success" | "error";
 
+const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const OSC_ESCAPE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const TRAILING_PADDING = / +((?:\x1b\[[0-?]*[ -/]*[@-~])*)$/;
+
+function trimAnsiPadding(line: string) {
+  return line.replace(TRAILING_PADDING, "$1");
+}
+
 export function toolFrameStatus(context: {
   isError?: boolean;
   isPartial?: boolean;
@@ -31,6 +39,48 @@ function fitLine(line: string, width: number): string {
 }
 
 /** Closed, rounded title section for a self-rendered tool shell. */
+export function closedToolFrameTopComponent(
+  title: Component,
+  status: ToolFrameStatus,
+  theme: Theme,
+  body: readonly string[] = [],
+): Component {
+  return {
+    invalidate() {
+      title.invalidate();
+    },
+    render(width: number) {
+      if (width < 2) return [theme.fg(borderColor(status), "╭")];
+      const border = (text: string) => theme.fg(borderColor(status), text);
+      const innerWidth = width - 2;
+      // OSC 8 hyperlinks confuse truncateToWidth at large terminal widths and
+      // leave title borders visibly short. Keep ANSI styling, but remove OSC
+      // metadata before measuring and fitting the framed component.
+      const rendered = title
+        .render(innerWidth)
+        .map((line) => line.replace(OSC_ESCAPE, ""));
+      const firstContentLine = rendered.findIndex(
+        (line) => line.replace(ANSI_ESCAPE, "").trim().length > 0,
+      );
+      const titleIndex = firstContentLine < 0 ? 0 : firstContentLine;
+      const renderedTitle = trimAnsiPadding(rendered[titleIndex] ?? "");
+      const label = truncateToWidth(
+        ` ${renderedTitle} `,
+        Math.max(0, innerWidth - 1),
+        "…",
+      );
+      const fill = "─".repeat(
+        Math.max(0, innerWidth - 1 - visibleWidth(label)),
+      );
+      const lines = [border("╭─") + label + border(`${fill}╮`)];
+      for (const row of [...rendered.slice(titleIndex + 1), ...body]) {
+        lines.push(border("│") + fitLine(row, innerWidth) + border("│"));
+      }
+      return lines;
+    },
+  };
+}
+
 export function closedToolFrameTop(
   title: string,
   status: ToolFrameStatus,

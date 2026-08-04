@@ -40,6 +40,15 @@ export function getRunEntries(
   return baselineIndex === -1 ? [] : branch.slice(baselineIndex + 1);
 }
 
+export function isAbortedRun(entries: readonly SessionEntry[]) {
+  return entries.some(
+    (entry) =>
+      entry.type === "message" &&
+      entry.message.role === "assistant" &&
+      entry.message.stopReason === "aborted",
+  );
+}
+
 function truncateUtf8(text: string, maxBytes: number) {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
 

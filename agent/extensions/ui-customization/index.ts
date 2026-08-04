@@ -19,15 +19,10 @@
 import { homedir } from "node:os";
 import { relative } from "node:path";
 import {
-  createEditToolDefinition,
-  createReadToolDefinition,
   CustomEditor,
-  type AgentToolResult,
   type ExtensionAPI,
-  type EditToolDetails,
   type ExtensionContext,
   type ReadonlyFooterDataProvider,
-  type ReadToolDetails,
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
@@ -36,7 +31,6 @@ import {
   hyperlink,
   truncateToWidth,
   visibleWidth,
-  type Component,
 } from "@earendil-works/pi-tui";
 import {
   emptyGitInfoState,
@@ -47,11 +41,6 @@ import {
   isGitInfoState,
   isModelInfoState,
 } from "../shared/dashboard-state.ts";
-import {
-  closedToolFrameResult,
-  closedToolFrameTopComponent,
-  toolFrameStatus,
-} from "../shared/closed-tool-frame.ts";
 import { sanitizeTerminalText } from "../shared/terminal-text.ts";
 
 function formatTokens(tokens: number) {
@@ -73,10 +62,6 @@ function formatDirectory(cwd: string) {
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const HORIZONTAL_BORDER = /^─+(?: [↑↓] \d+ more ─*)?$/;
 const SELECTOR_FRAME_STATE = Symbol.for("pi-config.selector-frame-state");
-const READ_CALL_COMPONENT = Symbol("read-call-component");
-const READ_RESULT_COMPONENT = Symbol("read-result-component");
-const EDIT_CALL_COMPONENT = Symbol("edit-call-component");
-const EDIT_RESULT_COMPONENT = Symbol("edit-result-component");
 const RELOAD_SCREEN_TEXT =
   "Reloading keybindings, extensions, skills, prompts, themes, and context files";
 const BOXED_SELECTORS = new Set([
@@ -235,100 +220,6 @@ function columns(left: string, right: string, width: number) {
 
 export default function uiCustomization(pi: ExtensionAPI) {
   const selectorFrameState = installSelectorFrames();
-  const readTool = createReadToolDefinition(process.cwd());
-
-  // Keep the built-in read implementation and syntax-highlighting renderer,
-  // but give it the same full-width closed shell as the custom search tools.
-  pi.registerTool({
-    ...readTool,
-    renderShell: "self",
-    execute(toolCallId, params, signal, onUpdate, ctx) {
-      return createReadToolDefinition(ctx.cwd).execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-      );
-    },
-    renderCall(args, theme, context) {
-      const state = context.state as Record<PropertyKey, unknown>;
-      const component = createReadToolDefinition(context.cwd).renderCall!(
-        args,
-        theme,
-        {
-          ...context,
-          lastComponent: state[READ_CALL_COMPONENT] as Component | undefined,
-        },
-      );
-      state[READ_CALL_COMPONENT] = component;
-      return closedToolFrameTopComponent(
-        component,
-        toolFrameStatus(context),
-        theme,
-      );
-    },
-    renderResult(result, options, theme, context) {
-      const state = context.state as Record<PropertyKey, unknown>;
-      const component = createReadToolDefinition(context.cwd).renderResult!(
-        result as AgentToolResult<ReadToolDetails | undefined>,
-        options,
-        theme,
-        {
-          ...context,
-          lastComponent: state[READ_RESULT_COMPONENT] as Component | undefined,
-        },
-      );
-      state[READ_RESULT_COMPONENT] = component;
-      return closedToolFrameResult(component, toolFrameStatus(context), theme);
-    },
-  });
-
-  const editTool = createEditToolDefinition(process.cwd());
-  pi.registerTool({
-    ...editTool,
-    renderShell: "self",
-    execute(toolCallId, params, signal, onUpdate, ctx) {
-      return createEditToolDefinition(ctx.cwd).execute(
-        toolCallId,
-        params,
-        signal,
-        onUpdate,
-        ctx,
-      );
-    },
-    renderCall(args, theme, context) {
-      const state = context.state as Record<PropertyKey, unknown>;
-      const component = createEditToolDefinition(context.cwd).renderCall!(
-        args,
-        theme,
-        {
-          ...context,
-          lastComponent: state[EDIT_CALL_COMPONENT] as Component | undefined,
-        },
-      );
-      state[EDIT_CALL_COMPONENT] = component;
-      return closedToolFrameTopComponent(
-        component,
-        toolFrameStatus(context),
-        theme,
-      );
-    },
-    renderResult(result, options, theme, context) {
-      const state = context.state as Record<PropertyKey, unknown>;
-      const component = createEditToolDefinition(context.cwd).renderResult!(
-        result as AgentToolResult<EditToolDetails | undefined>,
-        options,
-        theme,
-        {
-          ...context,
-          lastComponent: state[EDIT_RESULT_COMPONENT] as Component | undefined,
-        },
-      );
-      state[EDIT_RESULT_COMPONENT] = component;
-      return closedToolFrameResult(component, toolFrameStatus(context), theme);
-    },
-  });
 
   let title = "pi";
   let modelInfo = emptyModelInfoState();

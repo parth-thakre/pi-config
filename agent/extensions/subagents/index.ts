@@ -82,7 +82,11 @@ import {
   runTool,
   type SubagentRuntime,
 } from "./src/runtime.ts";
-import { openSubagentPicker, openSubagentTakeover } from "./src/ui/takeover.ts";
+import {
+  openSubagentPicker,
+  openSubagentTakeover,
+  promptForSubagent,
+} from "./src/ui/takeover.ts";
 
 const SUBAGENT_OUTPUT_MAX_BYTES = 24 * 1024;
 const WAIT_OUTPUT_MAX_BYTES = 48 * 1024;
@@ -791,7 +795,11 @@ export default function (pi: ExtensionAPI) {
 
     let prompt = rawArgs.trim();
     if (!prompt) {
-      const input = await ctx.ui.input("by the way", "Ask a one-off question…");
+      const input = await promptForSubagent(
+        ctx,
+        "by the way",
+        "Ask a one-off question…",
+      );
       prompt = input?.trim() ?? "";
       if (!prompt) return;
     }

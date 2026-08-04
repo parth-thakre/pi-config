@@ -54,7 +54,7 @@ function statusWord(snap: SubagentSnapshot, theme: Theme): string {
   }
 }
 
-function composeSubagentPanel(
+export function composeSubagentPanel(
   theme: Theme,
   title: string,
   rows: readonly string[],
@@ -102,6 +102,92 @@ function composeSubagentPanel(
 
 export interface TakeoverOptions {
   readonly badge?: string;
+}
+
+class SubagentPromptView implements Component, Focusable {
+  private readonly input = new Input();
+  private readonly tui: TUI;
+  private readonly theme: Theme;
+  private readonly keybindings: KeybindingsManager;
+  private readonly title: string;
+  private readonly placeholder: string;
+  private readonly done: (value: string | undefined) => void;
+  private _focused = false;
+
+  get focused() {
+    return this._focused;
+  }
+
+  set focused(value: boolean) {
+    this._focused = value;
+    this.input.focused = value;
+  }
+
+  constructor(
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    title: string,
+    placeholder: string,
+    done: (value: string | undefined) => void,
+  ) {
+    this.tui = tui;
+    this.theme = theme;
+    this.keybindings = keybindings;
+    this.title = title;
+    this.placeholder = placeholder;
+    this.done = done;
+    this.input.onSubmit = (value) => this.done(value.trim() || undefined);
+    this.input.onEscape = () => this.done(undefined);
+  }
+
+  handleInput(data: string) {
+    if (
+      this.keybindings.matches(data, "tui.select.cancel") ||
+      this.keybindings.matches(data, "app.interrupt")
+    ) {
+      this.done(undefined);
+      return;
+    }
+    this.input.handleInput(data);
+    this.tui.requestRender();
+  }
+
+  render(width: number) {
+    const innerWidth = Math.max(0, width - 2);
+    const rows = [
+      this.theme.fg("muted", ` ${this.placeholder}`),
+      ...this.input.render(innerWidth),
+      this.theme.fg(
+        "dim",
+        ` ${configuredKeys(this.keybindings, "tui.input.submit")} submit · ${configuredKeys(this.keybindings, "tui.select.cancel")} cancel`,
+      ),
+    ];
+    return composeSubagentPanel(
+      this.theme,
+      this.title,
+      rows,
+      width,
+      rows.length + 2,
+      true,
+    );
+  }
+
+  invalidate() {
+    this.input.invalidate();
+  }
+}
+
+/** Fully framed single-line prompt used before opening a takeover session. */
+export function promptForSubagent(
+  ctx: ExtensionCommandContext,
+  title: string,
+  placeholder: string,
+) {
+  return ctx.ui.custom<string | undefined>(
+    (tui, theme, keybindings, done) =>
+      new SubagentPromptView(tui, theme, keybindings, title, placeholder, done),
+  );
 }
 
 export async function openSubagentTakeover(
@@ -568,23 +654,18 @@ class TakeoverView implements Component, Focusable {
     );
 
     const inputLines = this.input.render(innerWidth);
+    const controls = theme.fg(
+      "dim",
+      ` ${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
+    );
     lines.push(
       ...composeSubagentPanel(
         theme,
         snap.status === "running" ? "Message subagent" : "Continue subagent",
-        inputLines,
+        [...inputLines, controls],
         width,
-        inputLines.length + 2,
+        inputLines.length + 3,
         true,
-      ),
-    );
-    lines.push(
-      truncateToWidth(
-        theme.fg(
-          "dim",
-          ` ${configuredKeys(this.keybindings, "tui.input.submit")} send · ${configuredKeys(this.keybindings, "app.interrupt")} back · ${configuredKeys(this.keybindings, "app.clear")} abort · ${configuredKeys(this.keybindings, "tui.editor.cursorUp")}/${configuredKeys(this.keybindings, "tui.editor.cursorDown")} scroll · ${configuredKeys(this.keybindings, "tui.editor.pageUp")}/${configuredKeys(this.keybindings, "tui.editor.pageDown")} page`,
-        ),
-        width,
       ),
     );
     return lines;

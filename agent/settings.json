@@ -5,7 +5,13 @@
   "defaultThinkingLevel": "low",
   "hideThinkingBlock": false,
   "packages": [
-    "git:github.com/parth-thakre/pi-config",
+    {
+      "source": "git:github.com/parth-thakre/pi-config",
+      "extensions": [],
+      "skills": [],
+      "prompts": [],
+      "themes": []
+    },
     "git:github.com/parth-thakre/pi-wierd-stuff"
   ],
   "theme": "trans-pride",
